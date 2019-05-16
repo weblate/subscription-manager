@@ -34,15 +34,29 @@ from iniparse import ConfigParser
 from .stubs import StubProductCertificate, \
         StubProduct, StubEntitlementCertificate, StubContent, \
         StubProductDirectory, StubConsumerIdentity, StubEntitlementDirectory
-from subscription_manager.repolib import Repo, RepoActionInvoker, \
-        RepoUpdateActionCommand, TidyWriter, RepoFile, YumReleaseverSource, \
-        YumPluginManager
+from subscription_manager.repolib import RepoActionInvoker, \
+        RepoUpdateActionCommand, YumReleaseverSource, YumPluginManager
+from subscription_manager.repofile import Repo, TidyWriter, YumRepoFile
 from subscription_manager import injection as inj
 from rhsm.config import RhsmConfigParser
 from rhsmlib.services import config
 
 from subscription_manager import repolib
+from subscription_manager import repofile
 from subscription_manager.entcertlib import CONTENT_ACCESS_CERT_TYPE
+
+
+class ConfigFromString(config.Config):
+    def __init__(self, config_string):
+        parser = RhsmConfigParserFromString(config_string)
+        super(ConfigFromString, self).__init__(parser)
+
+
+class RhsmConfigParserFromString(RhsmConfigParser):
+    def __init__(self, config_string):
+        SafeConfigParser.__init__(self)
+        self.stringio = six.StringIO(config_string)
+        self.readfp(self.stringio)
 
 
 class TestRepoActionInvoker(fixture.SubManFixture):
@@ -71,7 +85,9 @@ class TestRepoActionInvoker(fixture.SubManFixture):
         inj.provide(inj.ENT_DIR, stub_ent_dir)
         inj.provide(inj.PROD_DIR, stub_prod_dir)
 
-    def test_is_managed(self):
+    @patch('subscription_manager.repolib.ServerCache')
+    def test_is_managed(self, mock_server_cache):
+        mock_server_cache._write_cache_file = MagicMock()
         self._stub_content()
         repo_action_invoker = RepoActionInvoker()
         repo_label = 'a_test_repo'
@@ -86,13 +102,17 @@ class TestRepoActionInvoker(fixture.SubManFixture):
         repo_file = repo_action_invoker.get_repo_file()
         self.assertFalse(repo_file is None)
 
-    def test_get_repos_empty_dirs(self):
+    @patch('subscription_manager.repolib.ServerCache')
+    def test_get_repos_empty_dirs(self, mock_server_cache):
+        mock_server_cache._write_cache_file = MagicMock()
         repo_action_invoker = RepoActionInvoker()
         repos = repo_action_invoker.get_repos()
         if repos:
             self.fail("get_repos() should have returned an empty set but did not.")
 
-    def test_get_repos(self):
+    @patch('subscription_manager.repolib.ServerCache')
+    def test_get_repos(self, mock_server_cache):
+        mock_server_cache._write_cache_file = MagicMock()
         self._stub_content(include_content_access=True)
         repo_action_invoker = RepoActionInvoker()
         repos = repo_action_invoker.get_repos()
@@ -102,6 +122,34 @@ class TestRepoActionInvoker(fixture.SubManFixture):
         repo = matching_repos[0]
         certpath = repo.get('sslclientcert')
         self.assertNotEqual(certpath, self.stub_content_access_cert.path)
+
+
+PROXY_NO_PROTOCOL = """
+[server]
+proxy_hostname = fake.server.com
+proxy_port = 3129
+"""
+
+PROXY_HTTP_PROTOCOL = """
+[server]
+proxy_hostname = fake.server.com
+proxy_scheme = http
+proxy_port = 3129
+"""
+
+PROXY_HTTPS_PROTOCOL = """
+[server]
+proxy_hostname = fake.server.com
+proxy_scheme = https
+proxy_port = 3129
+"""
+
+PROXY_EXTRA_SCHEME = """
+[server]
+proxy_hostname = fake.server.com
+proxy_scheme = https://
+proxy_port = 3129
+"""
 
 
 class RepoTests(unittest.TestCase):
@@ -144,6 +192,30 @@ class RepoTests(unittest.TestCase):
         existing_repo = Repo('testrepo')
         existing_repo['fake_prop'] = 'fake'
         self.assertTrue(('fake_prop', 'fake') in list(existing_repo.items()))
+
+    @patch.object(repofile, 'conf', ConfigFromString(config_string=PROXY_NO_PROTOCOL))
+    def test_http_by_default(self):
+        repo = Repo('testrepo')
+        r = Repo._set_proxy_info(repo)
+        self.assertEqual(r['proxy'], "http://fake.server.com:3129")
+
+    @patch.object(repofile, 'conf', ConfigFromString(config_string=PROXY_HTTP_PROTOCOL))
+    def test_http(self):
+        repo = Repo('testrepo')
+        r = Repo._set_proxy_info(repo)
+        self.assertEqual(r['proxy'], "http://fake.server.com:3129")
+
+    @patch.object(repofile, 'conf', ConfigFromString(config_string=PROXY_HTTPS_PROTOCOL))
+    def test_https(self):
+        repo = Repo('testrepo')
+        r = Repo._set_proxy_info(repo)
+        self.assertEqual(r['proxy'], "https://fake.server.com:3129")
+
+    @patch.object(repofile, 'conf', ConfigFromString(config_string=PROXY_EXTRA_SCHEME))
+    def test_extra_chars_in_scheme(self):
+        repo = Repo('testrepo')
+        r = Repo._set_proxy_info(repo)
+        self.assertEqual(r['proxy'], "https://fake.server.com:3129")
 
 
 class RepoActionReportTests(fixture.SubManFixture):
@@ -212,6 +284,13 @@ class RepoUpdateActionTests(fixture.SubManFixture):
         inj.provide(inj.ENT_DIR, ent_dir)
 
         repolib.ConsumerIdentity = StubConsumerIdentity
+        self.patcher = patch('subscription_manager.repolib.ServerCache')
+        self.mock_server_cache = self.patcher.start()
+        self.mock_server_cache._write_cache_file = MagicMock()
+
+    def tearDown(self):
+        super(RepoUpdateActionTests, self).tearDown()
+        self.patcher.stop()
 
     def _find_content(self, content_list, name):
         """
@@ -261,10 +340,14 @@ class RepoUpdateActionTests(fixture.SubManFixture):
         self.assertEqual('blah', old_repo['gpgcheck'])
         self.assertEqual('some_key', old_repo['gpgkey'])
 
-    @patch("subscription_manager.repolib.RepoFile")
-    def test_update_when_new_repo(self, mock_file):
-        mock_file = mock_file.return_value
+    @patch("subscription_manager.repolib.get_repo_file_classes")
+    def test_update_when_new_repo(self, mock_get_repo_file_classes):
+        mock_file = MagicMock()
+        mock_file.CONTENT_TYPES = [None]
+        mock_file.fix_content = lambda x: x
         mock_file.section.return_value = None
+        mock_class = MagicMock(return_value=mock_file)
+        mock_get_repo_file_classes.return_value = [(mock_class, mock_class)]
 
         def stub_content():
             return [Repo('x', [('gpgcheck', 'original'), ('gpgkey', 'some_key')])]
@@ -277,13 +360,17 @@ class RepoUpdateActionTests(fixture.SubManFixture):
         self.assertEqual('some_key', written_repo['gpgkey'])
         self.assertEqual(1, update_report.updates())
 
-    @patch("subscription_manager.repolib.RepoFile")
-    def test_update_when_repo_not_modified_on_mutable(self, mock_file):
+    @patch("subscription_manager.repolib.get_repo_file_classes")
+    def test_update_when_repo_not_modified_on_mutable(self, mock_get_repo_file_classes):
         self._inject_mock_invalid_consumer()
-        mock_file = mock_file.return_value
         modified_repo = Repo('x', [('gpgcheck', 'original'), ('gpgkey', 'some_key')])
         server_repo = Repo('x', [('gpgcheck', 'original')])
-        mock_file.section = MagicMock(side_effect=[modified_repo, server_repo])
+        mock_file = MagicMock()
+        mock_file.CONTENT_TYPES = [None]
+        mock_file.fix_content = lambda x: x
+        mock_file.section.side_effect = [modified_repo, server_repo]
+        mock_class = MagicMock(return_value=mock_file)
+        mock_get_repo_file_classes.return_value = [(mock_class, mock_class)]
 
         def stub_content():
             return [Repo('x', [('gpgcheck', 'new'), ('gpgkey', 'new_key'), ('name', 'test')])]
@@ -300,13 +387,17 @@ class RepoUpdateActionTests(fixture.SubManFixture):
         self.assertEqual('new', written_repo['gpgcheck'])
         self.assertEqual(None, written_repo['gpgkey'])
 
-    @patch("subscription_manager.repolib.RepoFile")
-    def test_update_when_repo_modified_on_mutable(self, mock_file):
+    @patch("subscription_manager.repolib.get_repo_file_classes")
+    def test_update_when_repo_modified_on_mutable(self, mock_get_repo_file_classes):
         self._inject_mock_invalid_consumer()
-        mock_file = mock_file.return_value
         modified_repo = Repo('x', [('gpgcheck', 'unoriginal'), ('gpgkey', 'some_key')])
         server_repo = Repo('x', [('gpgcheck', 'original')])
-        mock_file.section = MagicMock(side_effect=[modified_repo, server_repo])
+        mock_file = MagicMock()
+        mock_file.CONTENT_TYPES = [None]
+        mock_file.fix_content = lambda x: x
+        mock_file.section.side_effect = [modified_repo, server_repo]
+        mock_class = MagicMock(return_value=mock_file)
+        mock_get_repo_file_classes.return_value = [(mock_class, mock_class)]
 
         def stub_content():
             return [Repo('x', [('gpgcheck', 'new'), ('gpgkey', 'new_key'), ('name', 'test')])]
@@ -745,22 +836,22 @@ class YumReleaseverSourceIsSetTest(fixture.SubManFixture):
         self.assertTrue(YumReleaseverSource.is_set({'releaseVer': 'None'}))
 
 
-class RepoFileTest(unittest.TestCase):
+class YumRepoFileTest(unittest.TestCase):
 
-    @patch("subscription_manager.repolib.RepoFile.create")
-    @patch("subscription_manager.repolib.TidyWriter")
+    @patch("subscription_manager.repofile.YumRepoFile.create")
+    @patch("subscription_manager.repofile.TidyWriter")
     def test_configparsers_equal(self, tidy_writer, stub_create):
-        rf = RepoFile()
+        rf = YumRepoFile()
         other = RawConfigParser()
         for parser in [rf, other]:
             parser.add_section('test')
             parser.set('test', 'key', 'val')
         self.assertTrue(rf._configparsers_equal(other))
 
-    @patch("subscription_manager.repolib.RepoFile.create")
-    @patch("subscription_manager.repolib.TidyWriter")
+    @patch("subscription_manager.repofile.YumRepoFile.create")
+    @patch("subscription_manager.repofile.TidyWriter")
     def test_configparsers_diff_sections(self, tidy_writer, stub_create):
-        rf = RepoFile()
+        rf = YumRepoFile()
         rf.add_section('new_section')
         other = RawConfigParser()
         for parser in [rf, other]:
@@ -768,10 +859,10 @@ class RepoFileTest(unittest.TestCase):
             parser.set('test', 'key', 'val')
         self.assertFalse(rf._configparsers_equal(other))
 
-    @patch("subscription_manager.repolib.RepoFile.create")
-    @patch("subscription_manager.repolib.TidyWriter")
+    @patch("subscription_manager.repofile.YumRepoFile.create")
+    @patch("subscription_manager.repofile.TidyWriter")
     def test_configparsers_diff_item_val(self, tidy_writer, stub_create):
-        rf = RepoFile()
+        rf = YumRepoFile()
         other = RawConfigParser()
         for parser in [rf, other]:
             parser.add_section('test')
@@ -779,10 +870,10 @@ class RepoFileTest(unittest.TestCase):
         rf.set('test', 'key', 'val2')
         self.assertFalse(rf._configparsers_equal(other))
 
-    @patch("subscription_manager.repolib.RepoFile.create")
-    @patch("subscription_manager.repolib.TidyWriter")
+    @patch("subscription_manager.repofile.YumRepoFile.create")
+    @patch("subscription_manager.repofile.TidyWriter")
     def test_configparsers_diff_items(self, tidy_writer, stub_create):
-        rf = RepoFile()
+        rf = YumRepoFile()
         other = RawConfigParser()
         for parser in [rf, other]:
             parser.add_section('test')
@@ -790,10 +881,10 @@ class RepoFileTest(unittest.TestCase):
         rf.set('test', 'somekey', 'val')
         self.assertFalse(rf._configparsers_equal(other))
 
-    @patch("subscription_manager.repolib.RepoFile.create")
-    @patch("subscription_manager.repolib.TidyWriter")
+    @patch("subscription_manager.repofile.YumRepoFile.create")
+    @patch("subscription_manager.repofile.TidyWriter")
     def test_configparsers_equal_int(self, tidy_writer, stub_create):
-        rf = RepoFile()
+        rf = YumRepoFile()
         other = RawConfigParser()
         for parser in [rf, other]:
             parser.add_section('test')
@@ -814,20 +905,6 @@ manage_repos =
 [rhsmcertd]
 certCheckInterval = 240
 """
-
-
-class ConfigFromString(config.Config):
-    def __init__(self, config_string):
-        parser = RhsmConfigParserFromString(config_string)
-        super(ConfigFromString, self).__init__(parser)
-
-
-class RhsmConfigParserFromString(RhsmConfigParser):
-    def __init__(self, config_string):
-        SafeConfigParser.__init__(self)
-        self.stringio = six.StringIO(config_string)
-        self.readfp(self.stringio)
-
 
 unset_config = """[server]
 hostname = server.example.conf
@@ -851,67 +928,92 @@ manage_repos = 37
 
 
 class TestManageReposEnabled(fixture.SubManFixture):
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=unset_config))
+    @patch.object(repofile, 'conf', ConfigFromString(config_string=unset_config))
     def test(self):
         # default stub config, no manage_repo defined, uses default
-        manage_repos_enabled = repolib.manage_repos_enabled()
+        manage_repos_enabled = repofile.manage_repos_enabled()
         self.assertEqual(manage_repos_enabled, True)
 
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=unset_manage_repos_cfg_buf))
+    @patch.object(repofile, 'conf', ConfigFromString(config_string=unset_manage_repos_cfg_buf))
     def test_empty_manage_repos(self):
-        manage_repos_enabled = repolib.manage_repos_enabled()
+        manage_repos_enabled = repofile.manage_repos_enabled()
         self.assertEqual(manage_repos_enabled, True)
 
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=manage_repos_zero_config))
+    @patch.object(repofile, 'conf', ConfigFromString(config_string=manage_repos_zero_config))
     def test_empty_manage_repos_zero(self):
-        manage_repos_enabled = repolib.manage_repos_enabled()
+        manage_repos_enabled = repofile.manage_repos_enabled()
         self.assertEqual(manage_repos_enabled, False)
 
-    @patch.object(repolib, 'config', ConfigFromString(config_string=manage_repos_bool_config))
+    @patch.object(repofile, 'config', ConfigFromString(config_string=manage_repos_bool_config))
     def test_empty_manage_repos_bool(self):
-        manage_repos_enabled = repolib.manage_repos_enabled()
+        manage_repos_enabled = repofile.manage_repos_enabled()
         # Should fail, and return default of 1
         self.assertEqual(manage_repos_enabled, True)
 
-    @patch.object(repolib, 'config', ConfigFromString(config_string=manage_repos_not_an_int))
+    @patch.object(repofile, 'config', ConfigFromString(config_string=manage_repos_not_an_int))
     def test_empty_manage_repos_not_an_int(self):
-        manage_repos_enabled = repolib.manage_repos_enabled()
+        manage_repos_enabled = repofile.manage_repos_enabled()
         # Should fail, and return default of 1
         self.assertEqual(manage_repos_enabled, True)
 
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=manage_repos_int_37))
+    @patch.object(repofile, 'conf', ConfigFromString(config_string=manage_repos_int_37))
     def test_empty_manage_repos_int_37(self):
-        manage_repos_enabled = repolib.manage_repos_enabled()
+        manage_repos_enabled = repofile.manage_repos_enabled()
         # Should fail, and return default of 1
         self.assertEqual(manage_repos_enabled, True)
 
 
-AUTO_ENABLE_YUM_PLUGINS_ENABLED = """
+AUTO_ENABLE_PKG_PLUGINS_ENABLED = """
 [rhsm]
 auto_enable_yum_plugins = 1
 """
 
-AUTO_ENABLE_YUM_PLUGINS_DISABLED = """
+AUTO_ENABLE_PKG_PLUGINS_DISABLED = """
 [rhsm]
 auto_enable_yum_plugins = 0
 """
 
-YUM_PLUGIN_CONF_FILE_ENABLED = """
+PKG_PLUGIN_CONF_FILE_ENABLED_INT = """
 [main]
 enabled = 1
 """
 
-YUM_PLUGIN_CONF_FILE_DISABLED = """
+PKG_PLUGIN_CONF_FILE_ENABLED_BOOL = """
+[main]
+enabled = true
+"""
+
+PKG_PLUGIN_CONF_FILE_DISABLED_INT = """
 [main]
 enabled = 0
 """
 
-YUM_PLUGIN_CONF_FILE_WRONG_VALUE = """
+PKG_PLUGIN_CONF_FILE_DISABLED_BOOL = """
+[main]
+enabled = false
+"""
+
+PKG_PLUGIN_CONF_FILE_WRONG_VALUE = """
 [main]
 enabled = 4
 """
 
-YUM_PLUGIN_CONF_FILE_CORRUPTED = """
+PKG_PLUGIN_CONF_FILE_INVALID_VALUE = """
+[main]
+enabled = 1.0
+"""
+
+PKG_PLUGIN_CONF_MISSING_MAIN_SECTION = """
+[test]
+option = value
+"""
+
+PKG_PLUGIN_CONF_MISSING_ENABLED_OPTION = """
+[main]
+option = value
+"""
+
+PKG_PLUGIN_CONF_FILE_CORRUPTED = """
 [main
 enable =
 """
@@ -922,109 +1024,209 @@ class TestYumPluginManager(unittest.TestCase):
     This class is intended for testing YumPluginManager
     """
 
+    ORIGINAL_DNF_PLUGIN_DIR = YumPluginManager.DNF_PLUGIN_DIR
     ORIGINAL_YUM_PLUGIN_DIR = YumPluginManager.YUM_PLUGIN_DIR
-    ORIGINAL_YUM_PLUGINS = YumPluginManager.YUM_PLUGINS
+    ORIGINAL_PLUGINS = YumPluginManager.PLUGINS
 
-    def init_plugin_conf_files(self, conf_string):
+    def init_yum_plugin_conf_files(self, conf_string):
         """
         Mock configuration files of plugins
         """
-        tmp_dir = tempfile.mkdtemp()
-        f, plug_file_name_01 = tempfile.mkstemp(prefix='', suffix='.conf', dir=tmp_dir, text=True)
-        f, plug_file_name_02 = tempfile.mkstemp(prefix='', suffix='.conf', dir=tmp_dir, text=True)
+        yum_tmp_dir = tempfile.mkdtemp()
+        f, plug_file_name_01 = tempfile.mkstemp(prefix='', suffix='.conf', dir=yum_tmp_dir, text=True)
+        f, plug_file_name_02 = tempfile.mkstemp(prefix='', suffix='.conf', dir=yum_tmp_dir, text=True)
         with open(plug_file_name_01, "w") as plug_file_01:
             plug_file_01.write(conf_string)
         with open(plug_file_name_02, "w") as plug_file_02:
             plug_file_02.write(conf_string)
         self.plug_file_name_01 = plug_file_name_01
         self.plug_file_name_02 = plug_file_name_02
-        self.tmp_dir = tmp_dir
-        YumPluginManager.YUM_PLUGIN_DIR = tmp_dir
-        YumPluginManager.YUM_PLUGINS = [
-            plug_file_name_01.replace(tmp_dir, '').replace('.conf', ''),
-            plug_file_name_02.replace(tmp_dir, '').replace('.conf', '')
+        self.tmp_dir = yum_tmp_dir
+        YumPluginManager.YUM_PLUGIN_DIR = yum_tmp_dir
+        YumPluginManager.PLUGINS = [
+            plug_file_name_01.replace(yum_tmp_dir, '').replace('.conf', ''),
+            plug_file_name_02.replace(yum_tmp_dir, '').replace('.conf', '')
         ]
 
-    def restore_plugin_conf_files(self):
+    def restore_yum_plugin_conf_files(self):
         """
         Restore original constants in YumPluginManager
         """
         YumPluginManager.YUM_PLUGIN_DIR = self.ORIGINAL_YUM_PLUGIN_DIR
-        YumPluginManager.YUM_PLUGINS = self.ORIGINAL_YUM_PLUGINS
+        YumPluginManager.PLUGINS = self.ORIGINAL_PLUGINS
         os.unlink(self.plug_file_name_01)
         os.unlink(self.plug_file_name_02)
         os.rmdir(self.tmp_dir)
 
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_YUM_PLUGINS_ENABLED))
+    def init_dnf_plugin_conf_files(self, conf_string):
+        """
+        Mock configuration files of plugins
+        """
+        dnf_tmp_dir = tempfile.mkdtemp()
+        f, plug_file_name_01 = tempfile.mkstemp(prefix='', suffix='.conf', dir=dnf_tmp_dir, text=True)
+        f, plug_file_name_02 = tempfile.mkstemp(prefix='', suffix='.conf', dir=dnf_tmp_dir, text=True)
+        with open(plug_file_name_01, "w") as plug_file_01:
+            plug_file_01.write(conf_string)
+        with open(plug_file_name_02, "w") as plug_file_02:
+            plug_file_02.write(conf_string)
+        self.plug_file_name_01 = plug_file_name_01
+        self.plug_file_name_02 = plug_file_name_02
+        self.tmp_dir = dnf_tmp_dir
+        YumPluginManager.DNF_PLUGIN_DIR = dnf_tmp_dir
+        YumPluginManager.PLUGINS = [
+            plug_file_name_01.replace(dnf_tmp_dir, '').replace('.conf', ''),
+            plug_file_name_02.replace(dnf_tmp_dir, '').replace('.conf', '')
+        ]
+
+    def restore_dnf_plugin_conf_files(self):
+        """
+        Restore original constants in YumPluginManager
+        """
+        YumPluginManager.DNF_PLUGIN_DIR = self.ORIGINAL_DNF_PLUGIN_DIR
+        YumPluginManager.PLUGINS = self.ORIGINAL_PLUGINS
+        os.unlink(self.plug_file_name_01)
+        os.unlink(self.plug_file_name_02)
+        os.rmdir(self.tmp_dir)
+
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
     def test_enabling_disabled_yum_plugin(self):
         """
         Test automatic enabling of configuration files of disabled plugins
         """
-        self.init_plugin_conf_files(conf_string=YUM_PLUGIN_CONF_FILE_DISABLED)
-        plugin_list = YumPluginManager.enable_yum_plugins()
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_FILE_DISABLED_INT)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
         self.assertEqual(len(plugin_list), 2)
-        for plugin_conf_file_name in YumPluginManager.YUM_PLUGINS:
+        for plugin_conf_file_name in YumPluginManager.PLUGINS:
             yum_plugin_config = ConfigParser()
             result = yum_plugin_config.read(YumPluginManager.YUM_PLUGIN_DIR + '/' + plugin_conf_file_name + '.conf')
             self.assertGreater(len(result), 0)
             is_plugin_enabled = yum_plugin_config.getint('main', 'enabled')
             self.assertEqual(is_plugin_enabled, 1)
-        self.restore_plugin_conf_files()
+        self.restore_yum_plugin_conf_files()
 
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_YUM_PLUGINS_DISABLED))
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_DISABLED))
     def test_not_enabling_disabled_yum_plugin(self):
         """
         Test not enabling (disabled in rhsm.conf) of configuration files of disabled plugins
         """
-        self.init_plugin_conf_files(conf_string=YUM_PLUGIN_CONF_FILE_DISABLED)
-        plugin_list = YumPluginManager.enable_yum_plugins()
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_FILE_DISABLED_BOOL)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
         self.assertEqual(len(plugin_list), 0)
-        for plugin_conf_file_name in YumPluginManager.YUM_PLUGINS:
+        for plugin_conf_file_name in YumPluginManager.PLUGINS:
             yum_plugin_config = ConfigParser()
             result = yum_plugin_config.read(YumPluginManager.YUM_PLUGIN_DIR + '/' + plugin_conf_file_name + '.conf')
             self.assertGreater(len(result), 0)
-            is_plugin_enabled = yum_plugin_config.getint('main', 'enabled')
-            self.assertEqual(is_plugin_enabled, 0)
-        self.restore_plugin_conf_files()
+            is_plugin_enabled = yum_plugin_config.getboolean('main', 'enabled')
+            self.assertEqual(is_plugin_enabled, False)
+        self.restore_yum_plugin_conf_files()
 
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_YUM_PLUGINS_ENABLED))
-    def test_enabling_enabled_yum_plugin(self):
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
+    def test_enabling_disabled_dnf_plugin(self):
+        """
+        Test automatic enabling of configuration files of disabled plugins
+        """
+        self.init_dnf_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_FILE_DISABLED_INT)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
+        self.assertEqual(len(plugin_list), 2)
+        for plugin_conf_file_name in YumPluginManager.PLUGINS:
+            dnf_plugin_config = ConfigParser()
+            result = dnf_plugin_config.read(YumPluginManager.DNF_PLUGIN_DIR + '/' + plugin_conf_file_name + '.conf')
+            self.assertGreater(len(result), 0)
+            is_plugin_enabled = dnf_plugin_config.getint('main', 'enabled')
+            self.assertEqual(is_plugin_enabled, 1)
+        self.restore_dnf_plugin_conf_files()
+
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
+    def test_enabling_enabled_yum_plugin_int(self):
         """
         Test automatic enabling of configuration files of already enabled plugins
         """
-        self.init_plugin_conf_files(conf_string=YUM_PLUGIN_CONF_FILE_ENABLED)
-        plugin_list = YumPluginManager.enable_yum_plugins()
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_FILE_ENABLED_INT)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
         self.assertEqual(len(plugin_list), 0)
-        for plugin_conf_file_name in YumPluginManager.YUM_PLUGINS:
+        for plugin_conf_file_name in YumPluginManager.PLUGINS:
             yum_plugin_config = ConfigParser()
             result = yum_plugin_config.read(YumPluginManager.YUM_PLUGIN_DIR + '/' + plugin_conf_file_name + '.conf')
             self.assertGreater(len(result), 0)
             is_plugin_enabled = yum_plugin_config.getint('main', 'enabled')
             self.assertEqual(is_plugin_enabled, 1)
-        self.restore_plugin_conf_files()
+        self.restore_yum_plugin_conf_files()
 
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_YUM_PLUGINS_ENABLED))
-    def test_enabling_yum_plugin_with_wrong_conf(self):
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
+    def test_enabling_enabled_yum_plugin_bool(self):
         """
-        Test automatic enabling of configuration files of already plugins with wrong values in conf file.
+        Test automatic enabling of configuration files of already enabled plugins
         """
-        self.init_plugin_conf_files(conf_string=YUM_PLUGIN_CONF_FILE_WRONG_VALUE)
-        plugin_list = YumPluginManager.enable_yum_plugins()
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_FILE_ENABLED_BOOL)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
         self.assertEqual(len(plugin_list), 0)
-        for plugin_conf_file_name in YumPluginManager.YUM_PLUGINS:
+        for plugin_conf_file_name in YumPluginManager.PLUGINS:
+            yum_plugin_config = ConfigParser()
+            result = yum_plugin_config.read(YumPluginManager.YUM_PLUGIN_DIR + '/' + plugin_conf_file_name + '.conf')
+            self.assertGreater(len(result), 0)
+            # The file was not modified. We have to read value with with getboolean()
+            is_plugin_enabled = yum_plugin_config.getboolean('main', 'enabled')
+            self.assertEqual(is_plugin_enabled, True)
+        self.restore_yum_plugin_conf_files()
+
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
+    def test_enabling_yum_plugin_with_invalid_values(self):
+        """
+        Test automatic enabling of configuration files of already enabled plugins
+        """
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_FILE_INVALID_VALUE)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
+        self.assertEqual(len(plugin_list), 2)
+        for plugin_conf_file_name in YumPluginManager.PLUGINS:
             yum_plugin_config = ConfigParser()
             result = yum_plugin_config.read(YumPluginManager.YUM_PLUGIN_DIR + '/' + plugin_conf_file_name + '.conf')
             self.assertGreater(len(result), 0)
             is_plugin_enabled = yum_plugin_config.getint('main', 'enabled')
-            self.assertEqual(is_plugin_enabled, 4)
-        self.restore_plugin_conf_files()
+            self.assertEqual(is_plugin_enabled, 1)
+        self.restore_yum_plugin_conf_files()
 
-    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_YUM_PLUGINS_ENABLED))
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
+    def test_enabling_yum_plugin_with_wrong_conf(self):
+        """
+        Test automatic enabling of configuration files of already plugins with wrong values in conf file.
+        """
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_FILE_WRONG_VALUE)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
+        self.assertEqual(len(plugin_list), 2)
+        for plugin_conf_file_name in YumPluginManager.PLUGINS:
+            yum_plugin_config = ConfigParser()
+            result = yum_plugin_config.read(YumPluginManager.YUM_PLUGIN_DIR + '/' + plugin_conf_file_name + '.conf')
+            self.assertGreater(len(result), 0)
+            is_plugin_enabled = yum_plugin_config.getint('main', 'enabled')
+            self.assertEqual(is_plugin_enabled, 1)
+        self.restore_yum_plugin_conf_files()
+
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
     def test_enabling_yum_plugin_with_corrupted_conf_file(self):
         """
         This test only test YumPluginManager.enable_yum_plugins() can survive reading of corrupted
         yum plugin configuration file
         """
-        self.init_plugin_conf_files(conf_string=YUM_PLUGIN_CONF_FILE_CORRUPTED)
-        plugin_list = YumPluginManager.enable_yum_plugins()
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_FILE_CORRUPTED)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
         self.assertEqual(len(plugin_list), 0)
+
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
+    def test_enabling_yum_plugin_with_missing_main_section(self):
+        """
+        This test only test YumPluginManager.enable_yum_plugins() can survive reading of corrupted
+        yum plugin configuration file (missing main section)
+        """
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_MISSING_MAIN_SECTION)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
+        self.assertEqual(len(plugin_list), 2)
+
+    @patch.object(repolib, 'conf', ConfigFromString(config_string=AUTO_ENABLE_PKG_PLUGINS_ENABLED))
+    def test_enabling_yum_plugin_with_missing_enabled_option(self):
+        """
+        This test only test YumPluginManager.enable_yum_plugins() can survive reading of corrupted
+        yum plugin configuration file (missing option 'enabled')
+        """
+        self.init_yum_plugin_conf_files(conf_string=PKG_PLUGIN_CONF_MISSING_ENABLED_OPTION)
+        plugin_list = YumPluginManager.enable_pkg_plugins()
+        self.assertEqual(len(plugin_list), 2)

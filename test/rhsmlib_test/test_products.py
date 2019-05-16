@@ -14,14 +14,12 @@ from __future__ import print_function, division, absolute_import
 # in this software or its documentation.
 import dbus
 import mock
-import six
 import json
 import datetime
 
 from test.rhsmlib_test.base import DBusObjectTest, InjectionMockingTest
 
 from subscription_manager import injection as inj
-from subscription_manager.identity import Identity
 from subscription_manager.cert_sorter import CertSorter
 from subscription_manager.validity import ValidProductDateRangeCalculator
 from subscription_manager.cp_provider import CPProvider
@@ -326,8 +324,6 @@ class TestProductsDBusObject(DBusObjectTest, InjectionMockingTest):
         products_patcher = mock.patch('rhsmlib.dbus.objects.products.InstalledProducts')
         self.mock_products = products_patcher.start().return_value
         self.addCleanup(products_patcher.stop)
-
-        self.mock_identity = mock.Mock(spec=Identity, name="Identity")
         self.mock_identity.is_valid.return_value = True
         self.mock_identity.uuid = "id"
 
@@ -343,12 +339,6 @@ class TestProductsDBusObject(DBusObjectTest, InjectionMockingTest):
 
     def dbus_objects(self):
         return [ProductsDBusObject]
-
-    def test_must_be_registered_list_installed_products(self):
-        self.mock_identity.is_valid.return_value = False
-        list_products_method_args = ['', {}]
-        with six.assertRaisesRegex(self, dbus.DBusException, r'requires the consumer to be registered.*'):
-            self.dbus_request(None, self.interface.ListInstalledProducts, list_products_method_args)
 
     def test_list_installed_products_without_filter(self):
         expected_result = [
@@ -380,5 +370,5 @@ class TestProductsDBusObject(DBusObjectTest, InjectionMockingTest):
 
         self.mock_products.list.return_value = expected_result
 
-        dbus_method_args = ['', {}]
+        dbus_method_args = ['', {}, '']
         self.dbus_request(assertions, self.interface.ListInstalledProducts, dbus_method_args)

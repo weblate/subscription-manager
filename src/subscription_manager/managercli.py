@@ -32,11 +32,12 @@ import sys
 from time import localtime, strftime, strptime
 
 from rhsm.certificate import CertificateException
+from rhsm.certificate2 import CONTENT_ACCESS_CERT_TYPE
 from rhsm.https import ssl
 
 import rhsm.config
 import rhsm.connection as connection
-from rhsm.connection import ProxyException
+from rhsm.connection import ProxyException, UnauthorizedException, ConnectionException
 from rhsm.utils import remove_scheme, ServerUrlParseError
 
 from subscription_manager import identity
@@ -53,7 +54,7 @@ from subscription_manager.jsonwrapper import PoolWrapper
 from subscription_manager import managerlib
 from subscription_manager.managerlib import valid_quantity
 from subscription_manager.release import ReleaseBackend, MultipleReleaseProductsError
-from subscription_manager.repolib import RepoActionInvoker, RepoFile, YumPluginManager, manage_repos_enabled
+from subscription_manager.repolib import RepoActionInvoker, YumRepoFile, YumPluginManager, manage_repos_enabled
 from subscription_manager.utils import parse_server_info, \
         parse_baseurl_info, format_baseurl, is_valid_server_info, \
         MissingCaCertException, get_client_versions, get_server_versions, \
@@ -63,6 +64,7 @@ from subscription_manager.exceptions import ExceptionMapper
 from subscription_manager.printing_utils import columnize, format_name, \
         none_wrap_columnize_callback, echo_columnize_callback, highlight_by_filter_string_columnize_cb
 from subscription_manager.utils import generate_correlation_id
+from subscription_manager.syspurposelib import save_sla_to_syspurpose_metadata
 
 from subscription_manager.i18n import ungettext, ugettext as _
 
@@ -70,6 +72,7 @@ log = logging.getLogger(__name__)
 
 from rhsmlib.services import config, attach, products, unregister, entitlement, register
 from rhsmlib.services import exceptions
+from subscription_manager import syspurposelib
 
 conf = config.Config(rhsm.config.initConfig())
 
@@ -110,6 +113,7 @@ AVAILABLE_SUBS_LIST = [
     _("Service Level:"),
     _("Service Type:"),
     _("Subscription Type:"),
+    _("Starts:"),
     _("Ends:"),
     _("System Type:")
 ]
@@ -164,6 +168,10 @@ CONSUMED_LIST = [
     _("System Type:")
 ]
 
+SP_CONFLICT_MESSAGE = _("Due to a conflicting change made at the server the "
+                        "{attr} has not been set.\n{advice}")
+SP_ADVICE = _("If you'd like to overwrite the server side change please run: {command}")
+
 
 def handle_exception(msg, ex):
 
@@ -191,7 +199,7 @@ def handle_exception(msg, ex):
         system_exit(os.EX_SOFTWARE, ex)
 
 
-def show_autosubscribe_output(uep):
+def show_autosubscribe_output(uep, identity):
     installed_products = products.InstalledProducts(uep).list()
 
     if not installed_products:
@@ -200,7 +208,7 @@ def show_autosubscribe_output(uep):
         print(_("No products installed."))
         return 0
 
-    log.info("Attempted to auto-attach/heal the system.")
+    log.debug("Attempted to auto-attach/heal the system.")
     print(_("Installed Product Current Status:"))
     subscribed = 1
     all_subscribed = True
@@ -212,7 +220,11 @@ def show_autosubscribe_output(uep):
             all_subscribed = False
         print(columnize(PRODUCT_STATUS, echo_columnize_callback, product[0], status) + "\n")
     if not all_subscribed:
-        print(_("Unable to find available subscriptions for all your installed products."))
+        owner = uep.getOwner(identity.uuid)
+        if owner['contentAccessMode'] == "org_environment":
+            subscribed = 0
+        else:
+            print(_("Unable to find available subscriptions for all your installed products."))
     return subscribed
 
 
@@ -257,15 +269,17 @@ class CliCommand(AbstractCLICommand):
         return logging.getLogger('rhsm-app.%s.%s' % (self.__module__, self.__class__.__name__))
 
     def test_proxy_connection(self):
-        result = None
         if not self.proxy_hostname and not conf["server"]["proxy_hostname"]:
             return True
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(10)
-            result = s.connect_ex((self.proxy_hostname or conf["server"]["proxy_hostname"], int(self.proxy_port or rhsm.config.DEFAULT_PROXY_PORT)))
+            result = s.connect_ex((
+                self.proxy_hostname or conf["server"]["proxy_hostname"],
+                int(self.proxy_port or conf["server"]["proxy_port"] or rhsm.config.DEFAULT_PROXY_PORT)
+            ))
         except Exception as e:
-            log.info("Attempted bad proxy: %s" % e)
+            log.error("Attempted bad proxy: %s" % e)
             return False
         finally:
             s.close()
@@ -314,7 +328,7 @@ class CliCommand(AbstractCLICommand):
 
     def is_registered(self):
         self.identity = inj.require(inj.IDENTITY)
-        log.info('%s', self.identity)
+        log.debug('%s', self.identity)
         return self.identity.is_valid()
 
     def persist_server_options(self):
@@ -329,8 +343,7 @@ class CliCommand(AbstractCLICommand):
         return True
 
     def _default_client_version(self):
-        return {"subscription-manager": _("Unknown"),
-                "python-rhsm": _("Unknown")}
+        return {"subscription-manager": _("Unknown")}
 
     def _default_server_version(self):
         return {"candlepin": _("Unknown"),
@@ -339,7 +352,7 @@ class CliCommand(AbstractCLICommand):
 
     def log_client_version(self):
         self.client_versions = get_client_versions()
-        log.info("Client Versions: %s" % self.client_versions)
+        log.debug("Client Versions: %s" % self.client_versions)
 
     def log_server_version(self):
         # can't check the server version without a connection
@@ -349,8 +362,8 @@ class CliCommand(AbstractCLICommand):
 
         # get_server_versions needs to handle any exceptions
         # and return the server dict
-        self.server_versions = get_server_versions(self.no_auth_cp, exception_on_timeout=True)
-        log.info("Server Versions: %s" % self.server_versions)
+        self.server_versions = get_server_versions(self.no_auth_cp, exception_on_timeout=False)
+        log.debug("Server Versions: %s" % self.server_versions)
 
     def main(self, args=None):
 
@@ -450,7 +463,7 @@ class CliCommand(AbstractCLICommand):
 
         self.cp_provider = inj.require(inj.CP_PROVIDER)
         self.cp_provider.set_connection_info(**connection_info)
-        self.log.info("X-Correlation-ID: %s", self.correlation_id)
+        self.log.debug("X-Correlation-ID: %s", self.correlation_id)
         self.cp_provider.set_correlation_id(self.correlation_id)
 
         self.log_client_version()
@@ -513,8 +526,192 @@ class CliCommand(AbstractCLICommand):
                 raise ge
 
 
-class UserPassCommand(CliCommand):
+class SyspurposeCommand(CliCommand):
+    """
+    Abstract command for manipulating an attribute of system purpose.
+    """
 
+    def __init__(self, name, shortdesc=None, primary=False, attr=None, commands=('set', 'unset')):
+        super(SyspurposeCommand, self).__init__(name, shortdesc=shortdesc, primary=primary)
+        self.commands = commands
+        self.attr = attr
+
+        self.store = self._get_synced_store()
+
+        if 'set' in commands:
+            self.parser.add_option(
+                "--set",
+                dest="set",
+                help=(_("Set {attr} of system purpose".format(attr=attr)))
+            )
+        if 'unset' in commands:
+            self.parser.add_option(
+                "--unset",
+                dest="unset",
+                action="store_true",
+                help=(_("Unset {attr} of system purpose".format(attr=attr)))
+            )
+        if 'add' in commands:
+            self.parser.add_option(
+                "--add",
+                dest="to_add",
+                action="append",
+                default=[],
+                help=_("Add an item to the list ({attr}).".format(attr=attr))
+            )
+        if 'remove' in commands:
+            self.parser.add_option(
+                "--remove",
+                dest="to_remove",
+                action="append",
+                default=[],
+                help=_("Remove an item from the list ({attr}).".format(attr=attr))
+            )
+
+    def _get_synced_store(self):
+        try:
+            from syspurpose.files import SyncedStore
+            uep = inj.require(inj.CP_PROVIDER).get_consumer_auth_cp()
+            return SyncedStore(uep=uep, consumer_uuid=self.identity.uuid)
+        except ImportError:
+            return None
+
+    def _validate_options(self):
+        set = getattr(self.options, 'set', None)
+        unset = getattr(self.options, 'unset', None)
+        to_add = getattr(self.options, 'to_add', None)
+        to_remove = getattr(self.options, 'to_remove', None)
+
+        if set:
+            self.options.set = self.options.set.strip()
+        if to_add:
+            self.options.to_add = [x.strip() for x in self.options.to_add if isinstance(x, str)]
+        if to_remove:
+            self.options.to_remove = [x.strip() for x in self.options.to_remove
+                                      if isinstance(x, str)]
+
+        if (set or to_add or to_remove) and unset:
+            system_exit(os.EX_USAGE, _("--unset cannot be used with --set, --add, or --remove"))
+        if to_add and to_remove:
+            system_exit(os.EX_USAGE, _("--add cannot be used with --remove"))
+
+    def set(self):
+        self._set(self.options.set)
+        success_msg = "{attr} set to \"{val}\".".format(attr=self.attr, val=self.options.set)
+        self._check_result(
+            expectation=lambda res: res.get(self.attr) == self.options.set,
+            success_msg=success_msg,
+            command="subscription-manager {name} --set {val}".format(name=self.name,
+                                                                     val=self.options.set),
+            attr=self.attr
+        )
+
+    def _set(self, to_set):
+        if self.store:
+            self.store.set(self.attr, to_set)
+
+    def unset(self):
+        self._unset()
+        success_msg = _("{attr} unset.").format(attr=self.attr)
+        self._check_result(
+            expectation=lambda res: res.get(self.attr) in ["", None, []],
+            success_msg=success_msg,
+            command="subscription-manager {name} --unset".format(name=self.name),
+            attr=self.attr
+        )
+
+    def _unset(self):
+        if self.store:
+            self.store.unset(self.attr)
+
+    def add(self):
+        self._add(self.options.to_add)
+        success_msg = _("{attr} updated.").format(attr=self.name)
+        to_add = "--add " + " --add ".join(self.options.to_add)
+        command = "subscription-manager {name} ".format(name=self.name) + to_add
+        self._check_result(
+            expectation=lambda res: all(x in res.get('addons', []) for x in self.options.to_add),
+            success_msg=success_msg,
+            command=command,
+            attr=self.attr
+        )
+
+    def _add(self, to_add):
+        if not isinstance(to_add, list):
+            to_add = [to_add]
+
+        if self.store:
+            for item in to_add:
+                self.store.add(self.attr, item)
+
+    def remove(self):
+        self._remove(self.options.to_remove)
+        success_msg = _("{attr} updated.").format(attr=self.name.capitalize())
+        to_remove = "--remove " + "--remove ".join(self.options.to_remove)
+        command = "subscription-manager {name} ".format(name=self.name) + to_remove
+        self._check_result(
+            expectation=lambda res: all(x not in res.get('addons', []) for x in self.options.to_remove),
+            success_msg=success_msg,
+            command=command,
+            attr=self.attr
+        )
+
+    def _remove(self, to_remove):
+        if not isinstance(to_remove, list):
+            to_remove = [to_remove]
+
+        if self.store:
+            for item in to_remove:
+                self.store.remove(self.attr, item)
+
+    def show(self):
+        if self.is_registered():
+            syspurpose = self.sync().result
+        else:
+            syspurpose = syspurposelib.read_syspurpose()
+        if syspurpose is not None and self.attr in syspurpose and syspurpose[self.attr]:
+            val = syspurpose[self.attr]
+            values = val if not isinstance(val, list) else ", ".join(val)
+            print(_("Current {name}: {val}".format(name=self.name.capitalize(),
+                                                   val=values)))
+        else:
+            print(_("{name} not set.".format(name=self.name.capitalize())))
+
+    def sync(self):
+        return syspurposelib.SyspurposeSyncActionCommand().perform(include_result=True)[1]
+
+    def _do_command(self):
+        self._validate_options()
+
+        if getattr(self.options, 'unset', None):
+            self.unset()
+        elif getattr(self.options, 'set', None):
+            self.set()
+        elif hasattr(self.options, 'to_add') and len(self.options.to_add) > 0:
+            self.add()
+        elif hasattr(self.options, 'to_remove') and len(self.options.to_remove) > 0:
+            self.remove()
+        else:
+            self.show()
+
+    def check_syspurpose_support(self, attr):
+        if self.is_registered() and not self.cp.has_capability('syspurpose'):
+            print(_("Note: The currently configured entitlement server does not support System Purpose {attr}.".format(attr=attr)))
+
+    def _check_result(self, expectation, success_msg, command, attr):
+        if self.store:
+            self.store.sync()
+            result = self.store.get_cached_contents()
+        else:
+            result = {}
+        if result and not expectation(result):
+            advice = SP_ADVICE.format(command=command)
+            system_exit(os.EX_SOFTWARE, msgs=_(SP_CONFLICT_MESSAGE.format(attr=attr, advice=advice)))
+        else:
+            print(_(success_msg))
+
+
+class UserPassCommand(CliCommand):
     """
     Abstract class for commands that require a username and password
     """
@@ -641,7 +838,7 @@ class RefreshCommand(CliCommand):
 
             self.entcertlib.update()
 
-            log.info("Refreshed local data")
+            log.debug("Refreshed local data")
             print(_("All local data refreshed"))
         except connection.RestlibException as re:
             log.error(re)
@@ -720,7 +917,7 @@ class IdentityCommand(UserPassCommand):
 
                 print(_("Identity certificate has been regenerated."))
 
-                log.info("Successfully generated a new identity from server.")
+                log.debug("Successfully generated a new identity from server.")
         except connection.RestlibException as re:
             log.exception(re)
             log.error(u"Error: Unable to generate a new identity for the system: %s" % re)
@@ -745,7 +942,7 @@ class OwnersCommand(UserPassCommand):
             self.cp_provider.set_user_pass(self.username, self.password)
             self.cp = self.cp_provider.get_basic_auth_cp()
             owners = self.cp.getOwnerList(self.username)
-            log.info("Successfully retrieved org list from server.")
+            log.debug("Successfully retrieved org list from server.")
             if len(owners):
                 print("+-------------------------------------------+")
                 print("          %s %s" % (self.username, _("Organizations")))
@@ -775,7 +972,7 @@ class EnvironmentsCommand(OrgCommand):
                                                   False)
         self._add_url_options()
 
-    def _get_enviornments(self, org):
+    def _get_environments(self, org):
         return self.cp.getEnvironmentList(org)
 
     def _do_command(self):
@@ -784,7 +981,7 @@ class EnvironmentsCommand(OrgCommand):
             self.cp_provider.set_user_pass(self.username, self.password)
             self.cp = self.cp_provider.get_basic_auth_cp()
             if self.cp.supports_resource('environments'):
-                environments = self._get_enviornments(self.org)
+                environments = self._get_environments(self.org)
 
                 if len(environments):
                     print("+-------------------------------------------+")
@@ -798,7 +995,7 @@ class EnvironmentsCommand(OrgCommand):
             else:
                 system_exit(os.EX_UNAVAILABLE, _("Error: Server does not support environments."))
 
-            log.info("Successfully retrieved environment list from server.")
+            log.debug("Successfully retrieved environment list from server.")
         except connection.RestlibException as re:
             log.exception(re)
             log.error(u"Error: Unable to retrieve environment list from server: %s" % re)
@@ -847,44 +1044,40 @@ class AutohealCommand(CliCommand):
             self._toggle(self.options.enable or False)
 
 
-class ServiceLevelCommand(OrgCommand):
+class ServiceLevelCommand(SyspurposeCommand, OrgCommand):
 
     def __init__(self):
 
         shortdesc = _("Manage service levels for this system")
         self._org_help_text = _("specify an organization when listing available service levels using the organization key, only used with --list")
         super(ServiceLevelCommand, self).__init__("service-level", shortdesc,
-                                                  False)
-
+                                                  False, attr="service_level_agreement")
         self._add_url_options()
-        self.parser.add_option("--show", dest="show", action='store_true',
-                help=_("show this system's current service level"))
-        self.parser.add_option("--list", dest="list", action='store_true',
-                help=_("list all service levels available"))
-        self.parser.add_option("--set", dest="service_level",
-                               help=_("service level to apply to this system"))
-        self.parser.add_option("--unset", dest="unset",
-                               action='store_true',
-                               help=_("unset the service level for this system"))
+        self.parser.add_option(
+            "--show",
+            dest="show",
+            action='store_true',
+            help=_("show this system's current service level")
+        )
+        self.parser.add_option(
+            "--list",
+            dest="list",
+            action='store_true',
+            help=_("list all service levels available")
+        )
 
         self.identity = inj.require(inj.IDENTITY)
 
-    def _set_service_level(self, service_level):
-        consumer = self.cp.getConsumer(self.identity.uuid)
-        if 'serviceLevel' not in consumer:
-            system_exit(os.EX_UNAVAILABLE, _("Error: The service-level command is not supported by the server."))
-        self.cp.updateConsumer(self.identity.uuid, service_level=service_level)
-
     def _validate_options(self):
 
-        if self.options.service_level:
-            self.options.service_level = self.options.service_level.strip()
+        if self.options.set:
+            self.options.set = self.options.set.strip()
 
         # Assume --show if run with no args:
         if not self.options.list and \
            not self.options.show and \
-           not self.options.service_level and \
-           not self.options.service_level == "" and \
+           not self.options.set and \
+           not self.options.set == "" and \
            not self.options.unset:
             self.options.show = True
 
@@ -895,6 +1088,8 @@ class ServiceLevelCommand(OrgCommand):
             if self.options.list:
                 if not (self.options.username and self.options.password):
                     system_exit(os.EX_USAGE, _("Error: you must register or specify --username and --password to list service levels"))
+            elif self.options.unset or self.options.set:
+                pass  # RHBZ 1632248 : User should be able to set/unset while not registered.
             else:
                 system_exit(ERR_NOT_REGISTERED_CODE, ERR_NOT_REGISTERED_MSG)
 
@@ -910,36 +1105,51 @@ class ServiceLevelCommand(OrgCommand):
             else:
                 # get an UEP as consumer
                 self.cp = self.cp_provider.get_consumer_auth_cp()
-
-            if self.options.unset:
-                self.unset_service_level()
-
-            if self.options.service_level is not None:
-                self.set_service_level(self.options.service_level)
-
-            if self.options.show:
-                self.show_service_level()
-
-            if self.options.list:
-                self.list_service_levels()
-
         except connection.RestlibException as re:
             log.exception(re)
             log.error(u"Error: Unable to retrieve service levels: %s" % re)
             system_exit(os.EX_SOFTWARE, re.msg)
         except Exception as e:
             handle_exception(_("Error: Unable to retrieve service levels."), e)
-
-    def set_service_level(self, service_level):
-        if service_level == "":
-            self.unset_service_level()
         else:
-            self._set_service_level(service_level)
-            print(_("Service level set to: %s") % service_level)
+            try:
+                if self.options.unset:
+                    self.unset()
+                elif self.options.set is not None:
+                    self.set()
+                elif self.options.list:
+                    self.list_service_levels()
+                elif self.options.show:
+                    self.show_service_level()
+                else:
+                    self.show_service_level()
+            except UnauthorizedException as uex:
+                handle_exception(_(str(uex)), uex)
+            except connection.RestlibException as re:
+                log.exception(re)
+                log.error(u"Error: Unable to retrieve service levels: %s" % re)
+                system_exit(os.EX_SOFTWARE, re.msg)
 
-    def unset_service_level(self):
-        self._set_service_level("")
-        print(_("Service level preference has been unset"))
+    def set(self):
+        if self.cp.has_capability("syspurpose"):
+            super(ServiceLevelCommand, self).set()
+        else:
+            self.update_service_level(self.options.set)
+            print(_("Service level set to: \"{val}\".".format(val=self.options.set)))
+
+    def unset(self):
+        if self.cp.has_capability("syspurpose"):
+            super(ServiceLevelCommand, self).unset()
+        else:
+            self.update_service_level("")
+            print(_("Service level preference has been unset"))
+
+    def update_service_level(self, service_level):
+        consumer = self.cp.getConsumer(self.identity.uuid)
+        if 'serviceLevel' not in consumer:
+            system_exit(os.EX_UNAVAILABLE,
+                        _("Error: The service-level command is not supported by the server."))
+        self.cp.updateConsumer(self.identity.uuid, service_level=service_level)
 
     def show_service_level(self):
         consumer = self.cp.getConsumer(self.identity.uuid)
@@ -969,13 +1179,25 @@ class ServiceLevelCommand(OrgCommand):
                     print(sla)
             else:
                 print(_("This org does not have any subscriptions with service levels."))
+        except UnauthorizedException as e:
+            raise e
         except connection.RemoteServerException as e:
             system_exit(os.EX_UNAVAILABLE, _("Error: The service-level command is not supported by the server."))
         except connection.RestlibException as e:
             if e.code == 404 and e.msg.find('/servicelevels') > 0:
                 system_exit(os.EX_UNAVAILABLE, _("Error: The service-level command is not supported by the server."))
+            elif e.code == 404:
+                system_exit(os.EX_DATAERR, _(e.msg))
             else:
                 raise e
+
+
+class UsageCommand(SyspurposeCommand):
+
+    def __init__(self):
+        shortdesc = _("Manage usage setting for this system")
+        self._org_help_text = _("use set and unset to define the value for this field")
+        super(UsageCommand, self).__init__("usage", shortdesc, False, attr='usage', commands=('set', 'unset'))
 
 
 class RegisterCommand(UserPassCommand):
@@ -1075,7 +1297,7 @@ class RegisterCommand(UserPassCommand):
                 unregister.UnregisterService(self.cp).unregister()
                 self.entitlement_dir.__init__()
                 self.product_dir.__init__()
-                log.info("--force specified, unregistered old consumer: %s" % old_uuid)
+                log.debug("--force specified, unregistered old consumer: %s" % old_uuid)
                 print(_("The system with UUID %s has been unregistered") % old_uuid)
             except ssl.SSLError as e:
                 # since the user can override serverurl for register, a common use case is to try to switch servers
@@ -1092,8 +1314,13 @@ class RegisterCommand(UserPassCommand):
         # Proceed with new registration:
         try:
             if not self.options.activation_keys:
+                hostname = conf["server"]["hostname"]
+                if ":" in hostname:
+                    normalized_hostname = "[%s]" % hostname
+                else:
+                    normalized_hostname = hostname
                 print(_("Registering to: %s:%s%s") %
-                    (conf["server"]["hostname"], conf["server"]["port"], conf["server"]["prefix"]))
+                    (normalized_hostname, conf["server"]["port"], conf["server"]["prefix"]))
                 self.cp_provider.set_user_pass(self.username, self.password)
                 admin_cp = self.cp_provider.get_basic_auth_cp()
             else:
@@ -1104,7 +1331,7 @@ class RegisterCommand(UserPassCommand):
             service = register.RegisterService(admin_cp)
 
             if self.options.consumerid:
-                log.info("Registering as existing consumer: %s" % self.options.consumerid)
+                log.debug("Registering as existing consumer: %s" % self.options.consumerid)
                 consumer = service.register(None, consumerid=self.options.consumerid)
             else:
                 owner_key = self._determine_owner_key(admin_cp)
@@ -1115,7 +1342,8 @@ class RegisterCommand(UserPassCommand):
                     activation_keys=self.options.activation_keys,
                     environment=environment_id,
                     force=self.options.force,
-                    name=self.options.consumername
+                    name=self.options.consumername,
+                    type=self.options.consumertype
                 )
         except (connection.RestlibException, exceptions.ServiceError) as re:
             log.exception(re)
@@ -1144,7 +1372,7 @@ class RegisterCommand(UserPassCommand):
         # FactsLib (or a FactsManager?)
         # Must update facts to clear out the old ones:
         if self.options.consumerid:
-            log.info("Updating facts")
+            log.debug("Updating facts")
             #
             # FIXME: Need a ConsumerFacts.sync or update or something
             # TODO: We register, with facts, then update facts again...?
@@ -1171,16 +1399,18 @@ class RegisterCommand(UserPassCommand):
                                  "by the server. Did not complete your request."))
             try:
                 attach.AttachService(self.cp).attach_auto(self.options.service_level)
-                if self.options.service_level is not None:
-                    print(_("Service level set to: %s") % self.options.service_level)
             except connection.RestlibException as re:
                 print_error(re.msg)
             except Exception:
                 log.exception("Auto-attach failed")
                 raise
+            else:
+                if self.options.service_level is not None:
+                    save_sla_to_syspurpose_metadata(self.options.service_level)
+                    print(_("Service level set to: %s") % self.options.service_level)
 
         if self.options.consumerid or self.options.activation_keys or self.autoattach or self.cp.has_capability(CONTENT_ACCESS_CERT_CAPABILITY):
-            log.info("System registered, updating entitlements if needed")
+            log.debug("System registered, updating entitlements if needed")
             # update certs, repos, and caches.
             # FIXME: aside from the overhead, should this be cert_action_client.update?
             self.entcertlib.update()
@@ -1190,7 +1420,7 @@ class RegisterCommand(UserPassCommand):
             # update with latest cert info
             self.sorter = inj.require(inj.CERT_SORTER)
             self.sorter.force_cert_check()
-            subscribed = show_autosubscribe_output(self.cp)
+            subscribed = show_autosubscribe_output(self.cp, self.identity)
 
         self._request_validity_check()
         return subscribed
@@ -1311,6 +1541,14 @@ class UnRegisterCommand(CliCommand):
         print(_("System has been unregistered."))
 
 
+class AddonsCommand(SyspurposeCommand):
+
+    def __init__(self):
+        shortdesc = _("Modify or view the addons attribute of the system purpose")
+        super(AddonsCommand, self).__init__("addons", shortdesc=shortdesc, primary=False,
+                                            attr='addons', commands=['unset', 'add', 'remove'])
+
+
 class RedeemCommand(CliCommand):
 
     def __init__(self):
@@ -1396,10 +1634,6 @@ class ReleaseCommand(CliCommand):
             print(_("Release not set"))
 
     def _do_command(self):
-        more_product_cert_err_msg = _(
-            "Error: More than one release product certificate installed."
-        )
-
         cdn_url = conf['rhsm']['baseurl']
         # note: parse_baseurl_info will populate with defaults if not found
         (cdn_hostname, cdn_port, _cdn_prefix) = parse_baseurl_info(cdn_url)
@@ -1424,7 +1658,7 @@ class ReleaseCommand(CliCommand):
                 releases = self.release_backend.get_releases()
             except MultipleReleaseProductsError as err:
                 log.error("Getting releases failed: %s" % err)
-                system_exit(os.EX_CONFIG, more_product_cert_err_msg)
+                system_exit(os.EX_CONFIG, err.translated_message())
 
             if self.options.release in releases:
                 self.cp.updateConsumer(
@@ -1443,7 +1677,7 @@ class ReleaseCommand(CliCommand):
                 releases = self.release_backend.get_releases()
             except MultipleReleaseProductsError as err:
                 log.error("Getting releases failed: %s" % err)
-                system_exit(os.EX_CONFIG, more_product_cert_err_msg)
+                system_exit(os.EX_CONFIG, err.translated_message())
 
             if len(releases) == 0:
                 system_exit(os.EX_CONFIG, _(
@@ -1567,7 +1801,7 @@ class AttachCommand(CliCommand):
                         for ent in ents:
                             pool_json = ent['pool']
                             print(_("Successfully attached a subscription for: %s") % pool_json['productName'])
-                            log.info("Attached a subscription for %s (%s)" % (pool_json['productName'], pool))
+                            log.debug("Attached a subscription for %s (%s)" % (pool_json['productName'], pool))
                             subscribed = True
                     except connection.RestlibException as re:
                         log.exception(re)
@@ -1605,6 +1839,9 @@ class AttachCommand(CliCommand):
 
                     attach_service.attach_auto(self.options.service_level)
                     if self.options.service_level is not None:
+                        #  RHBZ 1632797 we should only save the sla if the sla was actually
+                        #  specified
+                        save_sla_to_syspurpose_metadata(self.options.service_level)
                         print(_("Service level set to: %s") % self.options.service_level)
 
             report = None
@@ -1621,7 +1858,7 @@ class AttachCommand(CliCommand):
                 else:
                     self.sorter.force_cert_check()
                     # run this after entcertlib update, so we have the new entitlements
-                    return_code = show_autosubscribe_output(self.cp)
+                    return_code = show_autosubscribe_output(self.cp, self.identity)
 
         except Exception as e:
             handle_exception("Unable to attach: %s" % e, e)
@@ -1686,20 +1923,6 @@ class RemoveCommand(CliCommand):
         elif not self.options.all and not self.options.pool_ids:
             system_exit(os.EX_USAGE, _("Error: This command requires that you specify one of --serial, --pool or --all."))
 
-    def _unbind_ids(self, unbind_method, consumer_uuid, ids):
-        success = []
-        failure = []
-        for id_ in ids:
-            try:
-                unbind_method(consumer_uuid, id_)
-                success.append(id_)
-            except connection.RestlibException as re:
-                if re.code == 410:
-                    system_exit(os.EX_SOFTWARE, re.msg)
-                failure.append(id_)
-                log.error(re)
-        return (success, failure)
-
     def _print_unbind_ids_result(self, success, failure, id_name):
         if success:
             if id_name == "pools":
@@ -1727,10 +1950,10 @@ class RemoveCommand(CliCommand):
         self._validate_options()
         return_code = 0
         if self.is_registered():
-            identity = inj.require(inj.IDENTITY)
+            ent_service = entitlement.EntitlementService(self.cp)
             try:
                 if self.options.all:
-                    total = self.cp.unbindAll(identity.uuid)
+                    total = ent_service.remove_all_entitlements()
                     # total will be None on older Candlepins that don't
                     # support returning the number of subscriptions unsubscribed from
                     if total is None:
@@ -1741,31 +1964,29 @@ class RemoveCommand(CliCommand):
                                         "%s subscriptions removed at the server.",
                                         count) % count)
                 else:
-                    removed_serials = []
+                    # Try to remove subscriptions defined by pool IDs first (remove --pool=...)
                     if self.options.pool_ids:
-                        pool_ids = unique_list_items(self.options.pool_ids)  # Don't allow duplicates
-                        pool_id_to_serials = self.entitlement_dir.list_serials_for_pool_ids(pool_ids)
-                        success, failure = self._unbind_ids(self.cp.unbindByPoolId, identity.uuid, pool_ids)
-                        self._print_unbind_ids_result(success, failure, "pools")
-                        if not success:
+                        removed_pools, unremoved_pools, removed_serials = ent_service.remove_entilements_by_pool_ids(self.options.pool_ids)
+                        if not removed_pools:
                             return_code = 1
-                        else:
-                            for pool_id in success:
-                                removed_serials.extend(pool_id_to_serials[pool_id])
-                    success = []
-                    failure = []  # Clear this list to make sure we don't display the pool ids as serial
+                        self._print_unbind_ids_result(removed_pools, unremoved_pools, "pools")
+                    else:
+                        removed_serials = []
+                    # Then try to remove subscriptions defined by serials (remove --serial=...)
+                    unremoved_serials = []
                     if self.options.serials:
                         serials = unique_list_items(self.options.serials)
-                        serials_to_remove = [serial for serial in serials if serial not in removed_serials]  # Don't remove serials already removed by a pool
-                        success, failure = self._unbind_ids(self.cp.unbindBySerial, identity.uuid, serials_to_remove)
-                        removed_serials.extend(success)
-                        if not success:
+                        # Don't remove serials already removed by a pool
+                        serials_to_remove = [serial for serial in serials if serial not in removed_serials]
+                        _removed_serials, unremoved_serials = ent_service.remove_entitlements_by_serials(serials_to_remove)
+                        removed_serials.extend(_removed_serials)
+                        if not _removed_serials:
                             return_code = 1
-                    self._print_unbind_ids_result(removed_serials, failure, "serial numbers")
-                self.entcertlib.update()
-            except connection.RestlibException as re:
-                log.error(re)
-                system_exit(os.EX_SOFTWARE, re.msg)
+                    # Print final result of removing pools
+                    self._print_unbind_ids_result(removed_serials, unremoved_serials, "serial numbers")
+            except connection.RestlibException as err:
+                log.error(err)
+                system_exit(os.EX_SOFTWARE, err.msg)
             except Exception as e:
                 handle_exception(_("Unable to perform remove due to the following exception: %s") % e, e)
         else:
@@ -1854,7 +2075,7 @@ class FactsCommand(CliCommand):
             except connection.RestlibException as re:
                 log.exception(re)
                 system_exit(os.EX_SOFTWARE, re.msg)
-            log.info("Succesfully updated the system facts.")
+            log.debug("Succesfully updated the system facts.")
             print(_("Successfully updated the system facts."))
 
 
@@ -2045,7 +2266,10 @@ class ReposCommand(CliCommand):
             cert_action_client.update()
             self._request_validity_check()
 
-        self.use_overrides = self.cp.supports_resource('content_overrides')
+        if self.is_registered():
+            self.use_overrides = self.cp.supports_resource('content_overrides')
+        else:
+            self.use_overrides = False
 
         # specifically, yum repos, for now.
         rl = RepoActionInvoker()
@@ -2058,8 +2282,10 @@ class ReposCommand(CliCommand):
             if len(repos):
                 # TODO: Perhaps this should be abstracted out as well...?
                 def filter_repos(repo):
-                    show_enabled = (self.options.list_enabled and repo["enabled"] != '0')
-                    show_disabled = (self.options.list_disabled and repo["enabled"] == '0')
+                    disabled_values = ['false', '0']
+                    repo_enabled = repo['enabled'].lower()
+                    show_enabled = (self.options.list_enabled and repo_enabled not in disabled_values)
+                    show_disabled = (self.options.list_disabled and repo_enabled in disabled_values)
 
                     return show_enabled or show_disabled
 
@@ -2097,6 +2323,10 @@ class ReposCommand(CliCommand):
         # arguments in order.
         repos_to_modify = {}
 
+        if not len(repos):
+            print (_("This system has no repositories available through subscriptions."))
+            return 1
+
         for (status, repoid) in repo_actions:
             matches = set([repo for repo in repos if fnmatch.fnmatch(repo.id, repoid)])
             if not matches:
@@ -2117,6 +2347,8 @@ class ReposCommand(CliCommand):
 
             if self.is_registered() and self.use_overrides:
                 overrides = [{'contentLabel': repo.id, 'name': 'enabled', 'value': repos_to_modify[repo]} for repo in repos_to_modify]
+                metadata_overrides = [{'contentLabel': repo.id, 'name': 'enabled_metadata', 'value': repos_to_modify[repo]} for repo in repos_to_modify]
+                overrides.extend(metadata_overrides)
                 results = self.cp.setContentOverrides(self.identity.uuid, overrides)
 
                 cache = inj.require(inj.OVERRIDE_STATUS_CACHE)
@@ -2131,8 +2363,9 @@ class ReposCommand(CliCommand):
                 changed_repos = [repo for repo in matches if repo['enabled'] != status]
                 for repo in changed_repos:
                     repo['enabled'] = status
+                    repo['enabled_metadata'] = status
                 if changed_repos:
-                    repo_file = RepoFile()
+                    repo_file = YumRepoFile()
                     repo_file.read()
                     for repo in changed_repos:
                         repo_file.update(repo)
@@ -2277,6 +2510,8 @@ class ListCommand(CliCommand):
                                help=_("lists only subscriptions or products containing the specified expression in the subscription or product information, varying with the list requested and the server version (case-insensitive)."))
         self.parser.add_option("--pool-only", dest="pid_only", action="store_true",
                                help=_("lists only the pool IDs for applicable available or consumed subscriptions; only used with --available and --consumed"))
+        self.parser.add_option('--afterdate', dest="after_date",
+                help=(_("show pools that are active on or after the given date; only used with --available (example: %s)") % strftime("%Y-%m-%d", localtime())))
 
     def _validate_options(self):
         if self.options.all and not self.options.available:
@@ -2293,6 +2528,29 @@ class ListCommand(CliCommand):
             system_exit(os.EX_USAGE, _("Error: --no-overlap is only applicable with --available"))
         if self.options.pid_only and self.options.installed:
             system_exit(os.EX_USAGE, _("Error: --pool-only is only applicable with --available and/or --consumed"))
+        if self.options.after_date and not self.options.available:
+            system_exit(os.EX_USAGE, _("Error: --afterdate is only applicable with --available"))
+        if self.options.after_date and self.options.on_date:
+            system_exit(os.EX_USAGE, _("Error: --afterdate cannot be used with --ondate"))
+
+    def _parse_date(self, date):
+        """
+        Turns a given date into a date object
+        :param date: Date string
+        :type date: str
+        :return: date
+        """
+        try:
+            # doing it this ugly way for pre python 2.5
+            return datetime.datetime(*(strptime(date, '%Y-%m-%d')[0:6]))
+        except Exception:
+            # Translators: dateexample is current date in format like 2014-11-31
+            msg = _(
+                "Date entered is invalid. Date should be in YYYY-MM-DD format (example: {"
+                "dateexample})")
+            dateexample = strftime("%Y-%m-%d", localtime())
+            system_exit(os.EX_DATAERR,
+                        msg.format(dateexample=dateexample))
 
     def _do_command(self):
         """
@@ -2322,25 +2580,20 @@ class ListCommand(CliCommand):
         if self.options.available:
             self.assert_should_be_registered()
             on_date = None
+            after_date = None
             if self.options.on_date:
-                try:
-                    # doing it this ugly way for pre python 2.5
-                    on_date = datetime.datetime(
-                            *(strptime(self.options.on_date, '%Y-%m-%d')[0:6]))
-                except Exception:
-                    # Translators: dateexample is current date in format like 2014-11-31
-                    msg = _("Date entered is invalid. Date should be in YYYY-MM-DD format (example: {dateexample})")
-                    dateexample = strftime("%Y-%m-%d", localtime())
-                    system_exit(os.EX_DATAERR,
-                                msg.format(dateexample=dateexample))
+                on_date = self._parse_date(self.options.on_date)
+            elif self.options.after_date:
+                after_date = self._parse_date(self.options.after_date)
 
             epools = entitlement.EntitlementService().get_available_pools(
-                get_all=self.options.all,
-                active_on=on_date,
-                overlapping=self.options.no_overlap,
-                uninstalled=self.options.match_installed,
-                filter_string=self.options.filter_string,
-                service_level=self.options.service_level
+                show_all=self.options.all,
+                on_date=on_date,
+                no_overlap=self.options.no_overlap,
+                match_installed=self.options.match_installed,
+                matches=self.options.filter_string,
+                service_level=self.options.service_level,
+                after_date=after_date,
             )
 
             if len(epools):
@@ -2378,6 +2631,7 @@ class ListCommand(CliCommand):
                                 data['service_level'] or "",
                                 data['service_type'] or "",
                                 data['pool_type'],
+                                data['startDate'],
                                 data['endDate'],
                                 machine_type, **kwargs) + "\n")
             elif not self.options.pid_only:
@@ -2408,8 +2662,7 @@ class ListCommand(CliCommand):
         service = entitlement.EntitlementService()
         certs = service.get_consumed_product_pools(
             service_level=service_level,
-            matches=filter_string,
-            pool_only=pid_only)
+            matches=filter_string)
 
         # Process and display our (filtered) certs:
         if len(certs):
@@ -2575,6 +2828,18 @@ class OverrideCommand(CliCommand):
             print(columnize(names, echo_columnize_callback, *values, indent=2) + "\n")
 
 
+class RoleCommand(SyspurposeCommand):
+    def __init__(self):
+        shortdesc = _("Modify system purpose role")
+        super(RoleCommand, self).__init__("role", shortdesc, primary=False, attr='role',
+                                          commands=['set', 'unset'])
+
+    def _validate_options(self):
+        self.check_syspurpose_support('role')
+        if self.options.set and self.options.unset:
+            system_exit(os.EX_USAGE, _("Error: Options --set and --unset of role subcommand are mutually exclusive."))
+
+
 class VersionCommand(CliCommand):
 
     def __init__(self):
@@ -2588,7 +2853,6 @@ class VersionCommand(CliCommand):
         print(_("subscription management server: %s") % self.server_versions["candlepin"])
         print(_("subscription management rules: %s") % self.server_versions["rules-version"])
         print("subscription-manager: %s" % self.client_versions["subscription-manager"])
-        print("python-rhsm: %s" % self.client_versions["python-rhsm"])
 
 
 class StatusCommand(CliCommand):
@@ -2605,11 +2869,9 @@ class StatusCommand(CliCommand):
         on_date = None
         if self.options.on_date:
             try:
-                on_date = datetime.datetime.strptime(self.options.on_date, '%Y-%m-%d')
-                if on_date.date() < datetime.datetime.now().date():
-                    system_exit(os.EX_USAGE, _("Past dates are not allowed"))
-            except Exception:
-                system_exit(os.EX_DATAERR, _("Date entered is invalid. Date should be in YYYY-MM-DD format (example: ") + strftime("%Y-%m-%d", localtime()) + " )")
+                on_date = entitlement.EntitlementService.parse_date(self.options.on_date)
+            except ValueError as err:
+                system_exit(os.EX_DATAERR, err)
 
         print("+-------------------------------------------+")
         print("   " + _("System Status Details"))
@@ -2623,7 +2885,23 @@ class StatusCommand(CliCommand):
         else:
             result = 1
 
-        print(_("Overall Status: %s\n") % service_status['status'])
+        ca_message = ""
+        has_cert = (_(
+                "Content Access Mode is set to Organization/Environment Access. This host has access to content, regardless of subscription status.\n"))
+
+        certs = self.entitlement_dir.list_with_content_access()
+        ca_certs = [cert for cert in certs if cert.entitlement_type == CONTENT_ACCESS_CERT_TYPE]
+        if ca_certs:
+            ca_message = has_cert
+        else:
+            try:
+                owner = self.cp.getOwner(self.identity.uuid)
+                if owner['contentAccessMode'] == "org_environment":
+                    ca_message = has_cert
+            except Exception as e:
+                log.debug("Unable to check the orgs content access mode: %s" % e)
+
+        print(_("Overall Status: %s\n%s") % (service_status['status'], ca_message))
 
         columns = get_terminal_width()
         for name in reasons:
@@ -2632,27 +2910,39 @@ class StatusCommand(CliCommand):
                 print('- %s' % format_name(message, 2, columns))
             print('')
 
+        try:
+            store = syspurposelib.get_sys_purpose_store()
+            if store:
+                store.sync()
+        except (OSError, ConnectionException) as ne:
+            log.exception(ne)
+
+        syspurpose_cache = inj.require(inj.SYSTEMPURPOSE_COMPLIANCE_STATUS_CACHE)
+        syspurpose_cache.load_status(self.cp, self.identity.uuid, on_date)
+        print(_("System Purpose Status: %s\n") % syspurpose_cache.get_overall_status())
+
         return result
 
 
 class ManagerCLI(CLI):
 
     def __init__(self):
-        commands = [RegisterCommand, UnRegisterCommand, ConfigCommand, ListCommand,
+        commands = [RegisterCommand, UnRegisterCommand, AddonsCommand, ConfigCommand, ListCommand,
                     SubscribeCommand, UnSubscribeCommand, FactsCommand,
                     IdentityCommand, OwnersCommand, RefreshCommand, CleanCommand,
                     RedeemCommand, ReposCommand, ReleaseCommand, StatusCommand,
                     EnvironmentsCommand, ImportCertCommand, ServiceLevelCommand,
                     VersionCommand, RemoveCommand, AttachCommand, PluginsCommand,
-                    AutohealCommand, OverrideCommand]
+                    AutohealCommand, OverrideCommand, RoleCommand, UsageCommand]
         CLI.__init__(self, command_classes=commands)
 
     def main(self):
         managerlib.check_identity_cert_perms()
-        enabled_yum_plugins = YumPluginManager.enable_yum_plugins()
-        if len(enabled_yum_plugins) > 0:
-            print(_('WARNING') + '\n\n' + YumPluginManager.warning_message(enabled_yum_plugins))
         ret = CLI.main(self)
+        # Try to enable all yum plugins (subscription-manager and plugin-id)
+        enabled_yum_plugins = YumPluginManager.enable_pkg_plugins()
+        if len(enabled_yum_plugins) > 0:
+            print('\n' + _('WARNING') + '\n\n' + YumPluginManager.warning_message(enabled_yum_plugins) + '\n')
         # Try to flush all outputs, see BZ: 1350402
         try:
             sys.stdout.flush()

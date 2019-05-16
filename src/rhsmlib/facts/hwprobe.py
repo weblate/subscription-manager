@@ -35,7 +35,7 @@ ethtool = None
 try:
     import ethtool
 except ImportError as e:
-    log.warn("Unable to import the 'ethtool' module.")
+    log.warning("Unable to import the 'ethtool' module.")
 
 # For python2.6 that doesn't have subprocess.check_output
 from rhsmlib.compat import check_output as compat_check_output
@@ -107,6 +107,7 @@ class HardwareCollector(collector.FactsCollector):
             self.get_release_info,
             self.get_mem_info,
             self.get_proc_cpuinfo,
+            self.get_proc_stat,
             self.get_cpu_info,
             self.get_ls_cpu_info,
             self.get_network_info,
@@ -215,7 +216,7 @@ class HardwareCollector(collector.FactsCollector):
                     nkey = '.'.join(["memory", key.lower()])
                     meminfo[nkey] = "%s" % int(value)
         except Exception as e:
-            log.warn("Error reading system memory information: %s", e)
+            log.warning("Error reading system memory information: %s", e)
         return meminfo
 
     def count_cpumask_entries(self, cpu, field):
@@ -351,6 +352,24 @@ class HardwareCollector(collector.FactsCollector):
         # we could enumerate each processor here as proc_cpuinfo.cpu.3.key =
         # value, but that is a lot of fact table entries
         return proc_cpuinfo
+
+    def get_proc_stat(self):
+        proc_stat = {}
+        fact_namespace = 'proc_stat'
+        proc_stat_path = '/proc/stat'
+
+        btime_re = r'btime\W*([0-9]+)\W*$'
+        try:
+            with open(proc_stat_path, 'r') as proc_stat_file:
+                for line in proc_stat_file.readlines():
+                    match = re.match(btime_re, line.strip())
+                    if match:
+                        proc_stat['%s.btime' % (fact_namespace)] = match.group(1)
+                        break  # We presently only care about the btime fact
+        except Exception as e:
+            # This fact is not required, only log failure to gather it at the debug level
+            log.debug("Could not gather proc_stat facts: %s", e)
+        return proc_stat
 
     def get_cpu_info(self):
         cpu_info = {}
@@ -542,7 +561,7 @@ class HardwareCollector(collector.FactsCollector):
                                             env=lscpu_env)
         except CalledProcessError as e:
             log.exception(e)
-            log.warn('Error with lscpu (%s) subprocess: %s', lscpu_cmd_string, e)
+            log.warning('Error with lscpu (%s) subprocess: %s', lscpu_cmd_string, e)
             return lscpu_info
 
         errors = []
@@ -559,11 +578,45 @@ class HardwareCollector(collector.FactsCollector):
                     errors.append(e)
 
         except Exception as e:
-            log.warn('Error reading system CPU information: %s', e)
+            log.warning('Error reading system CPU information: %s', e)
         if errors:
             log.debug('Errors while parsing lscpu output: %s', errors)
 
         return lscpu_info
+
+    def _get_ipv4_addr_list(self):
+        """
+        When DNS record is not configured properly for the system, then try to
+        get list of all IPv4 addresses from all devices. Return 127.0.0.1 only
+        in situation when there is only loopback device.
+        :return: list of IPv4 addresses
+        """
+        addr_list = []
+        interface_info = ethtool.get_interfaces_info(ethtool.get_devices())
+        for info in interface_info:
+            for addr in info.get_ipv4_addresses():
+                if addr.address != '127.0.0.1':
+                    addr_list.append(addr.address)
+        if len(addr_list) == 0:
+            addr_list = ['127.0.0.1']
+        return addr_list
+
+    def _get_ipv6_addr_list(self):
+        """
+        When DNS record is not configured properly for the system, then try to
+        get list of all IPv6 addresses from all devices. Return ::1 only
+        in situation when there no device with valid global IPv6 address.
+        :return: list of IPv6 addresses
+        """
+        addr_list = []
+        interface_info = ethtool.get_interfaces_info(ethtool.get_devices())
+        for info in interface_info:
+            for addr in info.get_ipv6_addresses():
+                if addr.scope == 'universe':
+                    addr_list.append(addr.address)
+        if len(addr_list) == 0:
+            addr_list = ['::1']
+        return addr_list
 
     def get_network_info(self):
         """
@@ -603,18 +656,20 @@ class HardwareCollector(collector.FactsCollector):
                 info = socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM)
                 ip_list = set([x[4][0] for x in info])
                 net_info['network.ipv4_address'] = ', '.join(ip_list)
-            except Exception:
-                net_info['network.ipv4_address'] = "127.0.0.1"
+            except Exception as err:
+                log.debug("Error during resolving IPv4 address of hostname: %s, %s" % (hostname, err))
+                net_info['network.ipv4_address'] = ', '.join(self._get_ipv4_addr_list())
 
             try:
                 info = socket.getaddrinfo(hostname, None, socket.AF_INET6, socket.SOCK_STREAM)
                 ip_list = set([x[4][0] for x in info])
                 net_info['network.ipv6_address'] = ', '.join(ip_list)
-            except Exception:
-                net_info['network.ipv6_address'] = "::1"
+            except Exception as err:
+                log.debug("Error during resolving IPv6 address of hostname: %s, %s" % (hostname, err))
+                net_info['network.ipv6_address'] = ', '.join(self._get_ipv6_addr_list())
 
         except Exception as err:
-            log.warn('Error reading networking information: %s', err)
+            log.warning('Error reading networking information: %s', err)
 
         return net_info
 
@@ -629,7 +684,6 @@ class HardwareCollector(collector.FactsCollector):
         try:
             interfaces_info = ethtool.get_interfaces_info(ethtool.get_devices())
             for info in interfaces_info:
-                master = None
                 mac_address = info.mac_address
                 device = info.device
                 # Omit mac addresses for sit and lo device types. See BZ838123
@@ -704,7 +758,7 @@ class HardwareCollector(collector.FactsCollector):
                 # "permanent" hw address are for this slave
                 try:
                     master = os.readlink('/sys/class/net/%s/master' % info.device)
-                #FIXME
+                # FIXME
                 except Exception:
                     master = None
 
@@ -716,7 +770,7 @@ class HardwareCollector(collector.FactsCollector):
 
         except Exception as e:
             log.exception(e)
-            log.warn("Error reading network interface information: %s", e)
+            log.warning("Error reading network interface information: %s", e)
         return netinfdict
 
     # from rhn-client-tools  hardware.py

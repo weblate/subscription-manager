@@ -26,9 +26,11 @@ import signal
 import socket
 import syslog
 import uuid
+import pkg_resources
 
 from six.moves import urllib
 from rhsm.https import ssl
+import six
 
 from subscription_manager.branding import get_branding
 from subscription_manager.certdirectory import Path
@@ -42,7 +44,6 @@ from rhsm.utils import parse_url
 from rhsm.connection import ProxyException
 
 import subscription_manager.version
-import rhsm.version
 from rhsm.connection import RestlibException, GoneException
 from rhsm.config import DEFAULT_PORT, DEFAULT_PREFIX, DEFAULT_HOSTNAME, \
     DEFAULT_CDN_HOSTNAME, DEFAULT_CDN_PORT, DEFAULT_CDN_PREFIX
@@ -215,20 +216,19 @@ def get_terminal_width():
 
 def get_client_versions():
     # It's possible (though unlikely, and kind of broken) to have more
-    # than one version of python-rhsm/subscription-manager installed.
+    # than one version of subscription-manager installed.
     # This will return whatever version we are using.
     sm_version = _("Unknown")
-    pr_version = _("Unknown")
 
     try:
-        pr_version = rhsm.version.rpm_version
         sm_version = subscription_manager.version.rpm_version
+        if sm_version is None or sm_version == "None":
+            sm_version = pkg_resources.require("subscription-manager")[0].version
     except Exception as e:
         log.debug("Client Versions: Unable to check client versions")
         log.exception(e)
 
-    return {"subscription-manager": sm_version,
-            "python-rhsm": pr_version}
+    return {"subscription-manager": sm_version}
 
 
 def get_server_versions(cp, exception_on_timeout=False):
@@ -267,7 +267,7 @@ def get_server_versions(cp, exception_on_timeout=False):
             # otherwise, ignore the timeout exception
         except Exception as e:
             if isinstance(e, GoneException):
-                log.info("Server Versions: Error: consumer has been deleted, unable to check server version")
+                log.warn("Server Versions: Error: consumer has been deleted, unable to check server version")
             else:
                 # a more useful error would be handy here
                 log.error("Error while checking server version: %s" % e)
@@ -330,7 +330,9 @@ def is_true_value(test_string):
 
 def system_log(message, priority=syslog.LOG_NOTICE):
     syslog.openlog("subscription-manager")
-    syslog.syslog(priority, message.encode("utf-8"))
+    if six.PY2:
+        message = message.encode("utf-8")
+    syslog.syslog(priority, message)
 
 
 def chroot(dirname):
@@ -377,12 +379,12 @@ class ProductCertificateFilter(CertificateFilter):
             '?': '.',
         }
 
-        expression = ur"""
+        expression = u"""
             ((?:                # A captured, non-capture group :)
-                [^*?\\]*        # Character literals and other uninteresting junk (greedy)
-                (?:\\.?)*       # Anything escaped with a backslash, or just a trailing backslash
+                [^*?\\\\]*        # Character literals and other uninteresting junk (greedy)
+                (?:\\\\.?)*       # Anything escaped with a backslash, or just a trailing backslash
             )*)                 # Repeat the above sequence 0+ times, greedily
-            ([*?]|\Z)           # Any of our wildcards (* or ?) not preceded by a backslash OR end of input
+            ([*?]|\\Z)           # Any of our wildcards (* or ?) not preceded by a backslash OR end of input
         """
 
         if filter_string is not None:

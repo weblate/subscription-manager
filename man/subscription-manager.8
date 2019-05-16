@@ -427,6 +427,12 @@ The
 command lists all of the subscriptions that are compatible with a system. The options allow the list to be filtered by subscriptions that are used by the system or unused subscriptions that are available to the system.
 
 .TP
+.B --afterdate=YYYY-MM-DD
+Shows pools that are active on or after the given date. This is only used with the
+.B --available
+option.
+
+.TP
 .B --all
 Lists all possible subscriptions that have been purchased, even if they don't match the architecture of the system. This is used with the
 .B --available
@@ -963,6 +969,7 @@ Quantity:		249237
 Service Level:		None
 Service Type:		None
 Multi-Entitlement:	No
+Starts:			01/01/2021
 Ends:			01/01/2022
 Machine Type:		physical
 .fi

@@ -16,7 +16,6 @@ from __future__ import print_function, division, absolute_import
 #
 import os
 
-from contextlib import nested
 from mock import Mock, NonCallableMock, patch, MagicMock
 
 from .stubs import StubUEP
@@ -26,7 +25,7 @@ from subscription_manager import injection as inj
 from subscription_manager import cache
 from subscription_manager.identity import ConsumerIdentity
 
-from .fixture import SubManFixture, Capture
+from .fixture import SubManFixture, Capture, set_up_mock_sp_store
 
 from rhsmlib.services.register import RegisterService
 from rhsmlib.services import exceptions
@@ -45,6 +44,16 @@ class CliRegistrationTests(SubManFixture):
             spec=ConsumerIdentity)
         self.mock_consumer_identity = identity_patcher.start().return_value
         self.addCleanup(identity_patcher.stop)
+
+        from subscription_manager import syspurposelib
+
+        self.syspurposelib = syspurposelib
+        self.syspurposelib.USER_SYSPURPOSE = self.write_tempfile("{}").name
+
+        syspurpose_patch = patch('subscription_manager.syspurposelib.SyncedStore')
+        self.mock_sp_store = syspurpose_patch.start()
+        self.mock_sp_store, self.mock_sp_store_contents = set_up_mock_sp_store(self.mock_sp_store)
+        self.addCleanup(syspurpose_patch.stop)
 
     def _inject_ipm(self):
         mock_ipm = NonCallableMock(spec=cache.InstalledProductsManager)
@@ -86,9 +95,10 @@ class CliRegistrationTests(SubManFixture):
         self._inject_ipm()
         self.mock_register.register.side_effect = exceptions.ServiceError()
 
-        with nested(Capture(silent=True), self.assertRaises(SystemExit)) as e:
-            cmd.main(['register', '--consumerid=TaylorSwift', '--username=testuser1', '--password=password', '--org=test_org'])
-            self.assertEqual(e.code, os.EX_USAGE)
+        with Capture(silent=True):
+            with self.assertRaises(SystemExit) as e:
+                cmd.main(['register', '--consumerid=TaylorSwift', '--username=testuser1', '--password=password', '--org=test_org'])
+                self.assertEqual(e.code, os.EX_USAGE)
 
     def test_strip_username_and_password(self):
         username, password = RegisterCommand._get_username_and_password(" ", " ")
@@ -167,8 +177,9 @@ class CliRegistrationTests(SubManFixture):
             rc.options.activation_keys = None
             rc._prompt_for_environment = Mock(return_value="not_an_env")
 
-            with nested(Capture(silent=True), self.assertRaises(SystemExit)):
-                rc._get_environment_id(mock_uep, 'owner', None)
+            with Capture(silent=True):
+                with self.assertRaises(SystemExit):
+                    rc._get_environment_id(mock_uep, 'owner', None)
 
     def test_deprecate_consumer_type(self):
         with patch('rhsm.connection.UEPConnection', new_callable=StubUEP) as mock_uep:
@@ -177,6 +188,7 @@ class CliRegistrationTests(SubManFixture):
             cmd = RegisterCommand()
             self._inject_mock_invalid_consumer()
 
-            with nested(Capture(silent=True), self.assertRaises(SystemExit)) as e:
-                cmd.main(['register', '--type=candlepin'])
-                self.assertEqual(e.code, os.EX_USAGE)
+            with Capture(silent=True):
+                with self.assertRaises(SystemExit) as e:
+                    cmd.main(['register', '--type=candlepin'])
+                    self.assertEqual(e.code, os.EX_USAGE)

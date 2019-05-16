@@ -20,6 +20,7 @@ Note: This module will fail to import if dmidecode fails to import.
       module that imports it should handle an import error as well."""
 import logging
 import os
+import six
 
 from subscription_manager.i18n import ugettext as _
 
@@ -72,7 +73,7 @@ class DmiFirmwareInfoCollector(collector.FactsCollector):
             # try to use it. Otherwise current device file will be used.
             if self.dump_file is not None:
                 self.use_dump_file(dmidecode)
-            log.info("Using dmidecode dump file: %s" % dmidecode.get_dev())
+            log.debug("Using dmidecode dump file: %s" % dmidecode.get_dev())
             dmi_data = {
                 "dmi.bios.": self._read_dmi(dmidecode.bios),
                 "dmi.processor.": self._read_dmi(dmidecode.processor),
@@ -87,7 +88,7 @@ class DmiFirmwareInfoCollector(collector.FactsCollector):
             for tag, func in list(dmi_data.items()):
                 dmiinfo = self._get_dmi_data(func, tag, dmiinfo)
         except Exception as e:
-            log.warn(_("Error reading system DMI information: %s"), e)
+            log.warn(_("Error reading system DMI information: %s"), e, exc_info=True)
         finally:
             self.log_warnings(dmidecode)
         return dmiinfo
@@ -97,13 +98,13 @@ class DmiFirmwareInfoCollector(collector.FactsCollector):
             return func()
         except Exception as e:
             log.warn(_("Error reading system DMI information with %s: %s"), func, e)
-            return None
+            return {}
 
     def _get_dmi_data(self, func, tag, ddict):
         for key, value in list(func.items()):
             for key1, value1 in list(value['data'].items()):
                 # FIXME: this loses useful data...
-                if not isinstance(value1, str):
+                if not isinstance(value1, six.text_type) and not isinstance(value1, six.binary_type):
                     # we are skipping things like int and bool values, as
                     # well as lists and dicts
                     continue
@@ -114,7 +115,7 @@ class DmiFirmwareInfoCollector(collector.FactsCollector):
                     self._socket_designation.append(value1)
 
                 nkey = ''.join([tag, key1.lower()]).replace(" ", "_")
-                ddict[nkey] = str(value1)
+                ddict[nkey] = six.text_type(value1, 'utf-8')
 
         # Populate how many socket descriptions we saw in a faux-fact, so we can
         # use it to munge lscpu info later if needed.
@@ -126,5 +127,5 @@ class DmiFirmwareInfoCollector(collector.FactsCollector):
     def log_warnings(self, dmidecode):
         dmiwarnings = dmidecode.get_warnings()
         if dmiwarnings:
-            log.warn(_("Error reading system DMI information: %s"), dmiwarnings)
+            log.warn(_("Error reading system DMI information: %s"), dmiwarnings, exc_info=True)
             dmidecode.clear_warnings()

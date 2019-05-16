@@ -73,6 +73,7 @@ static gboolean run_now = FALSE;
 static gint arg_cert_interval_minutes = -1;
 static gint arg_heal_interval_minutes = -1;
 static gboolean arg_no_splay = FALSE;
+static int fd_lock = -1;
 
 struct CertCheckData {
     int interval_seconds;
@@ -193,16 +194,17 @@ log_update_from_cert_data(gpointer data)
     return log_update(cert_data->interval_seconds, cert_data->next_update_file);
 }
 
-int gen_random(long int max) {
+long long gen_random(long long max) {
     // This function will return a random number between [0, max]
     // Find the nearest number to RAND_MAX that is divisible by the given max
     // The rand function will generate a random number in the range [0, RAND_MAX]
     // This function will constrain the output of rand to the range [0, max] while ensuring the output has no bias.
     // See http://www.azillionmonkeys.com/qed/random.html for an explanation of why this is necessary
-    long int true_max = max + (long int) 1;
+    long long true_max = max + (long long) 1;
     // 1 must be type cast to a long int to avoid integer overflow on certain systems
-    long int range_max = ((RAND_MAX + (long int) 1) / true_max) * true_max;
-    long int random_num = -1;
+    long long rand_max = (long long) RAND_MAX;
+    long long range_max = ((rand_max + (long long) 1) / true_max) * true_max;
+    long long random_num = -1;
     do {
         random_num = rand();
     } while(!(random_num < range_max));
@@ -213,6 +215,11 @@ int gen_random(long int max) {
 void
 signal_handler(int signo) {
     if (signo == SIGTERM) {
+        /* Close lock file and release lock on this file */
+        if (fd_lock != -1) {
+            close(fd_lock);
+            fd_lock = -1;
+        }
         info ("rhsmcertd is shutting down...");
         signal (signo, SIG_DFL);
         raise (signo);
@@ -222,15 +229,20 @@ signal_handler(int signo) {
 int
 get_lock ()
 {
-    int fdlock;
+    fd_lock = open (LOCKFILE, O_WRONLY | O_CREAT, 0640);
+    int ret = 0;
 
-    if ((fdlock = open (LOCKFILE, O_WRONLY | O_CREAT, 0640)) == -1)
-        return 1;
+    if (fd_lock == -1) {
+        ret = 1;
+    } else {
+        if (flock (fd_lock, LOCK_EX | LOCK_NB) == -1) {
+            close (fd_lock);
+            fd_lock = -1;
+            ret = 1;
+        }
+    }
 
-    if (flock (fdlock, LOCK_EX | LOCK_NB) == -1)
-        return 1;
-
-    return 0;
+    return ret;
 }
 
 static gboolean
@@ -499,7 +511,6 @@ parse_cli_args (int *argc, char *argv[])
 int
 main (int argc, char *argv[])
 {
-
     if (signal(SIGTERM, signal_handler) == SIG_ERR) {
         warn ("Unable to catch SIGTERM\n");
     }

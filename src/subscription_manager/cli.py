@@ -18,6 +18,8 @@ import os
 import sys
 import logging
 
+import six
+
 from subscription_manager.printing_utils import columnize, echo_columnize_callback
 from subscription_manager.i18n_optparse import OptionParser, WrappedIndentedHelpFormatter
 from subscription_manager.utils import print_error
@@ -31,6 +33,20 @@ log = logging.getLogger(__name__)
 class InvalidCLIOptionError(Exception):
     def __init__(self, message):
         Exception.__init__(self, message)
+
+
+def flush_stdout_stderr():
+    """
+    Try to flush stdout and stderr, when it is not possible
+    due to blocking process, then print error message to log file.
+    :return: None
+    """
+    # Try to flush all outputs, see BZ: 1350402
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except IOError as io_err:
+        log.error("Error: Unable to print data to stdout/stderr output during exit process: %s" % io_err)
 
 
 class AbstractCLICommand(object):
@@ -152,6 +168,7 @@ class CLI(object):
         cmd = self._find_best_match(sys.argv)
         if len(sys.argv) < 2:
             self._default_command()
+            flush_stdout_stderr()
             sys.exit(0)
         if not cmd:
             self._usage()
@@ -159,6 +176,7 @@ class CLI(object):
             return_code = 1
             if (len(sys.argv) > 1) and (sys.argv[1] == "--help"):
                 return_code = 0
+            flush_stdout_stderr()
             sys.exit(return_code)
 
         try:
@@ -188,16 +206,12 @@ def system_exit(code, msgs=None):
             if isinstance(msg, Exception):
                 msg = "%s" % msg
 
-            if isinstance(msg, unicode):
+            if isinstance(msg, six.text_type) and six.PY2:
                 print_error(msg.encode("utf8"))
             else:
                 print_error(msg)
 
     # Try to flush all outputs, see BZ: 1350402
-    try:
-        sys.stdout.flush()
-        sys.stderr.flush()
-    except IOError as io_err:
-        log.error("Error: Unable to print data to stdout/stderr output during exit process: %s" % io_err)
+    flush_stdout_stderr()
 
     sys.exit(code)

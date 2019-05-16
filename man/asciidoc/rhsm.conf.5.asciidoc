@@ -82,6 +82,11 @@ baseurl::
   the full *baseurl* would be for example:
   *https://sat6.example.com/pulp/repos* .
 
+repomd_gpg_url::
+  The URL of the GPG key that was used to sign this repository's metadata.
+  The specified GPG key will be used in addition to any GPG keys defined
+  by the entitlement.
+
 ca_cert_dir::
   The location for the certificates which are used to communicate with the
   server and to pulldown content.
@@ -113,7 +118,9 @@ full_refresh_on_yum::
 report_package_profile::
   Set to '1' if *rhsmcertd* should report the system's current package
   profile to the subscription service. This report helps the subscription
-  service provide better errata notifications.
+  service provide better errata notifications. If supported by the
+  entitlement server, enabled repos, enabled modules, and packages present
+  will be reported.
 
 pluginDir::
   The directory to search for subscription manager plugins

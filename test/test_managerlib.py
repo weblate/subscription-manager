@@ -925,7 +925,7 @@ class TestMergedPoolsStackingGroupSorter(unittest.TestCase):
         self.assertEqual(1, len(sorter.groups))
         group = sorter.groups[0]
 
-        self.assertEqual("Test Prod 2", group.name)
+        self.assertIn(group.name, ["Test Prod 1", "Test Prod 2"])
         self.assertEqual(2, len(group.entitlements))
 
         self.assertEqual(pools[0], group.entitlements[0])
@@ -965,11 +965,10 @@ class TestMergedPoolsStackingGroupSorter(unittest.TestCase):
         group1 = sorter.groups[0]
         group2 = sorter.groups[1]
 
-        self.assertEqual("Test Prod 2", group1.name)
+        self.assertEqual(set([group1.name, group2.name]), set(["", "Test Prod 2"]))
         self.assertEqual(1, len(group1.entitlements))
         self.assertEqual(pools[0], group1.entitlements[0])
 
-        self.assertEqual("", group2.name)
         self.assertEqual(1, len(group2.entitlements))
         self.assertEqual(pools[1], group2.entitlements[0])
 
@@ -1032,7 +1031,7 @@ class MergedPoolsTests(unittest.TestCase):
         self.assertFalse('virt_only' in merged_pools.pools[3]['attributes'])
 
 
-class PoolStashTest(unittest.TestCase):
+class PoolStashTest(SubManFixture):
 
     def test_empty_stash_zero_length(self):
         my_stash = PoolStash()
@@ -1116,7 +1115,8 @@ class TestGetAvailableEntitlements(SubManFixture):
         cp = self.get_consumer_cp()
 
         # patch the mock for getPoolsList
-        def get_pools_list(consumer=None, listAll=False, active_on=None, owner=None, filter_string=None):
+        def get_pools_list(consumer=None, listAll=False, active_on=None, owner=None, filter_string=None,
+                           after_date=None, future=None):
             if listAll:
                 return [self.build_pool_dict('1234'),
                         self.build_pool_dict('4321')]
@@ -1134,7 +1134,8 @@ class TestGetAvailableEntitlements(SubManFixture):
     def test_installed(self):
         cp = self.get_consumer_cp()
 
-        def get_pools_list(consumer=None, listAll=False, active_on=None, owner=None, filter_string=None):
+        def get_pools_list(consumer=None, listAll=False, active_on=None, owner=None, filter_string=None,
+                           after_date=None, future=None):
             if listAll:
                 return [self.build_pool_dict('1234', ['some_product']),
                         self.build_pool_dict('4321'),
@@ -1160,6 +1161,7 @@ class TestGetAvailableEntitlements(SubManFixture):
             'quantity': 5,
             'consumed': 1,
             'productId': '',
+            'startDate': datetime.now(GMT()).isoformat(),
             'endDate': datetime.now(GMT()).isoformat(),
             'providedProducts': [{'productId': prod_id} for prod_id in provided_products],
             'productAttributes': [{'name': 'foo',

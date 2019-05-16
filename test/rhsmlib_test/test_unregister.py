@@ -68,7 +68,6 @@ class TestUnregisterDBusObject(DBusObjectTest, InjectionMockingTest):
         self.unregister = unregister_patcher.start().return_value
         self.addCleanup(unregister_patcher.stop)
 
-        self.mock_identity = mock.Mock(spec=Identity, name="Identity").return_value
         self.mock_identity.is_valid.return_value = True
         self.mock_identity.uuid = "7a002098-c167-41f2-91b3-d0c71e808142"
 
@@ -88,6 +87,6 @@ class TestUnregisterDBusObject(DBusObjectTest, InjectionMockingTest):
 
     def test_must_be_registered_unregister(self):
         self.mock_identity.is_valid.return_value = False
-        unregister_method_args = [{}]
+        unregister_method_args = [{}, '']
         with six.assertRaisesRegex(self, dbus.DBusException, r'requires the consumer to be registered.*'):
             self.dbus_request(None, self.interface.Unregister, unregister_method_args)

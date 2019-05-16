@@ -10,10 +10,15 @@ from datetime import datetime, timedelta
 import re
 import sys
 import socket
+import shutil
 import os
+import json
 import tempfile
 import contextlib
 
+import six
+
+from subscription_manager import syspurposelib
 from subscription_manager import managercli, managerlib
 from subscription_manager.entcertlib import CONTENT_ACCESS_CERT_TYPE
 from subscription_manager.injection import provide, \
@@ -29,14 +34,16 @@ from .stubs import StubProductCertificate, StubEntitlementCertificate, \
         StubConsumerIdentity, StubProduct, StubUEP, StubProductDirectory, \
         StubCertSorter, StubPool
 from .fixture import FakeException, FakeLogger, SubManFixture, \
-        Capture, Matcher
+        Capture, Matcher, set_up_mock_sp_store
 
-from mock import patch, Mock, call
+from mock import patch, Mock, MagicMock, call
+from nose import SkipTest
 
 # for some exceptions
 from rhsm import connection
 from rhsm.https import ssl
-from M2Crypto import SSL
+if six.PY2:
+    from M2Crypto import SSL
 
 
 class InstalledProductStatusTests(SubManFixture):
@@ -152,13 +159,24 @@ class InstalledProductStatusTests(SubManFixture):
 
         # product3 isn't installed
         self.assertEqual(2, len(product_status))
-        self.assertEqual("product2", product_status[0][0])
+        self.assertEqual("product1", product_status[0][0])
         self.assertEqual("subscribed", product_status[0][4])
-        self.assertEqual("product1", product_status[1][0])
+        self.assertEqual("product2", product_status[1][0])
         self.assertEqual("subscribed", product_status[1][4])
 
 
 class TestCli(SubManFixture):
+    def setUp(self):
+        syspurpose_patch = patch('syspurpose.files.SyncedStore')
+        sp_patch = syspurpose_patch.start()
+        self.addCleanup(sp_patch.stop)
+        super(TestCli, self).setUp()
+        syspurposelib.USER_SYSPURPOSE = self.write_tempfile("{}").name
+
+    def tearDown(self):
+        super(TestCli, self).tearDown()
+        syspurposelib.USER_SYSPURPOSE = "/etc/rhsm/syspurpose/syspurpose.json"
+
     def test_cli(self):
         cli = managercli.ManagerCLI()
         self.assertTrue('register' in cli.cli_commands)
@@ -254,6 +272,96 @@ class TestCliCommand(SubManFixture):
                     self.assertEqual(os.EX_CONFIG, e.code)
             self.assertEqual(err_msg, cap.err)
 
+    def _test_exception(self, args):
+        try:
+            self.cc.main(args)
+            self.cc._validate_options()
+        except SystemExit as e:
+            self.assertEqual(e.code, os.EX_USAGE)
+        else:
+            self.fail("No Exception Raised")
+
+    def _test_no_exception(self, args):
+        try:
+            self.cc.main(args)
+            self.cc._validate_options()
+        except SystemExit:
+            self.fail("Exception Raised")
+
+
+class TestProxyConnection(SubManFixture):
+    """
+    This class is used for testing test_proxy_connection from class CliCommand
+    """
+
+    def setUp(self):
+        super(TestProxyConnection, self).setUp()
+        # Temporary stop patcher of test_proxy_connection, because we need to test behavior of
+        # original function
+        self.test_proxy_connection_patcher.stop()
+
+    def tearDown(self):
+        # Start patcher again
+        self.test_proxy_connection_patcher.start()
+        super(TestProxyConnection, self).tearDown()
+
+    @patch('socket.socket')
+    def test_proxy_connection_hostname_and_port(self, sock):
+        """
+        Test functionality of test_proxy_connection()
+        """
+        sock_instance = sock.return_value
+        sock_instance.settimeout = MagicMock()
+        sock_instance.connect_ex = MagicMock(return_value=0)
+        sock_instance.close = MagicMock()
+
+        cli = managercli.CliCommand()
+        cli.test_proxy_connection()
+
+        # Expected values are from fake configuration file (see stub.py)
+        sock_instance.connect_ex.assert_called_once_with(('notaproxy.grimlock.usersys.redhat.com', 4567))
+
+
+class TestStatusCommand(SubManFixture):
+    command_class = managercli.StatusCommand
+
+    def setUp(self):
+        super(TestStatusCommand, self).setUp()
+        self.cc = self.command_class()
+
+    def test_purpose_status_success(self):
+        self.cc.consumerIdentity = StubConsumerIdentity
+        self.cc.cp = StubUEP()
+        self.cc.cp.setSyspurposeCompliance({'status': 'valid'})
+        self.cc.cp._capabilities = ["syspurpose"]
+        self.cc.options = Mock()
+        self.cc.options.on_date = None
+        with Capture() as cap:
+            self.cc._do_command()
+        self.assertTrue('System Purpose Status: Matched' in cap.out)
+
+    def test_purpose_status_consumer_lack(self):
+        self.cc.consumerIdentity = StubConsumerIdentity
+        self.cc.cp = StubUEP()
+        self.cc.cp.setSyspurposeCompliance({'status': 'unknown'})
+        self.cc.cp._capabilities = ["syspurpose"]
+        self.cc.options = Mock()
+        self.cc.options.on_date = None
+        with Capture() as cap:
+            self.cc._do_command()
+        self.assertTrue('System Purpose Status: Unknown' in cap.out)
+
+    def test_purpose_status_consumer_no_capability(self):
+        self.cc.consumerIdentity = StubConsumerIdentity
+        self.cc.cp = StubUEP()
+        self.cc.cp.setSyspurposeCompliance({'status': 'unknown'})
+        self.cc.cp._capabilities = []
+        self.cc.options = Mock()
+        self.cc.options.on_date = None
+        with Capture() as cap:
+            self.cc._do_command()
+        self.assertTrue('System Purpose Status: Unknown' in cap.out)
+
 
 # for command classes that expect proxy related cli args
 class TestCliProxyCommand(TestCliCommand):
@@ -324,7 +432,7 @@ class TestEnvironmentsCommand(TestCliProxyCommand):
         environments.append({'name': 'library'})
         environments.append({'name': 'Binks'})
         self.cc.cp.setEnvironmentList(environments)
-        results = self.cc._get_enviornments("Anikan")
+        results = self.cc._get_environments("Anikan")
         self.assertTrue(len(results) == 4)
 
 
@@ -337,22 +445,11 @@ class TestRegisterCommand(TestCliProxyCommand):
         argv_patcher = patch.object(sys, 'argv', ['subscription-manager', 'register'])
         argv_patcher.start()
         self.addCleanup(argv_patcher.stop)
+        syspurposelib.USER_SYSPURPOSE = self.write_tempfile("{}").name
 
-    def _test_exception(self, args):
-        try:
-            self.cc.main(args)
-            self.cc._validate_options()
-        except SystemExit as e:
-            self.assertEqual(e.code, os.EX_USAGE)
-        else:
-            self.fail("No Exception Raised")
-
-    def _test_no_exception(self, args):
-        try:
-            self.cc.main(args)
-            self.cc._validate_options()
-        except SystemExit:
-            self.fail("Exception Raised")
+    def tearDown(self):
+        super(TestRegisterCommand, self).tearDown()
+        syspurposelib.USER_SYSPURPOSE = "/etc/rhsm/syspurpose/syspurpose.json"
 
     def test_keys_and_consumerid(self):
         self._test_exception(["--consumerid", "22", "--activationkey", "key"])
@@ -399,8 +496,55 @@ class TestRegisterCommand(TestCliProxyCommand):
             mock_save.assert_called_with()
 
 
+class TestAddonsCommand(TestCliCommand):
+    command_class = managercli.AddonsCommand
+
+    def _set_syspurpose(self, syspurpose):
+        """
+        Set the mocked out syspurpose to the given dictionary of values.
+        Assumes it is called after syspurposelib.USER_SYSPURPOSE is mocked out.
+        :param syspurpose: A dict of values to be set as the syspurpose
+        :return: None
+        """
+        with open(syspurposelib.USER_SYSPURPOSE, 'w') as sp_file:
+            json.dump(syspurpose, sp_file, ensure_ascii=True)
+
+    def setUp(self):
+        syspurpose_patch = patch('syspurpose.files.SyncedStore')
+        sp_patch = syspurpose_patch.start()
+        self.addCleanup(sp_patch.stop)
+        super(TestAddonsCommand, self).setUp()
+        argv_patcher = patch.object(sys, 'argv', ['subscription-manager', 'addons'])
+        argv_patcher.start()
+        self.addCleanup(argv_patcher.stop)
+        syspurposelib.USER_SYSPURPOSE = self.write_tempfile("{}").name
+
+    def tearDown(self):
+        super(TestAddonsCommand, self).tearDown()
+        syspurposelib.USER_SYSPURPOSE = "/etc/rhsm/syspurpose/syspurpose.json"
+
+    def test_view(self):
+        self._test_no_exception([])
+
+    def test_add(self):
+        self._test_no_exception(['--add', 'test'])
+
+    def test_add_and_remove(self):
+        self._test_exception(['--add', 'test', '--remove', 'something_else'])
+
+    def test_remove(self):
+        self._test_no_exception(['--remove', 'test'])
+
+    def test_unset(self):
+        self._test_no_exception(['--unset'])
+
+    def test_unset_and_add_and_remove(self):
+        self._test_exception(['--add', 'test', '--remove', 'item', '--unset'])
+
+
 class TestListCommand(TestCliProxyCommand):
     command_class = managercli.ListCommand
+    valid_date = '2018-05-01'
 
     def setUp(self):
         super(TestListCommand, self).setUp(False)
@@ -413,6 +557,75 @@ class TestListCommand(TestCliProxyCommand):
         argv_patcher = patch.object(sys, 'argv', ['subscription-manager', 'list'])
         argv_patcher.start()
         self.addCleanup(argv_patcher.stop)
+
+    def _test_afterdate_option(self, argv, method, should_exit=True, expected_exit_code=0):
+        msg = ""
+        with patch.object(sys, 'argv', argv):
+            try:
+                method()
+            except SystemExit as e:
+                self.assertEqual(e.code, expected_exit_code,
+                    """Cli should have exited with code '{}', got '{}'""".format(expected_exit_code,
+                        e.code))
+                fail = False
+            except Exception as e:
+                fail = True
+                msg = "Expected SystemExit, got \'\'\'{}\'\'\'".format(e)
+            else:
+                fail = should_exit
+                if fail:
+                    msg = "Expected SystemExit, No Exception was raised"
+
+            if fail:
+                self.fail(msg)
+
+    def test_afterdate_option_bad_date(self):
+        argv = ['subscription-manager', 'list', '--all', '--available', '--afterdate',
+                'not_a_real_date']
+        self._test_afterdate_option(argv, self.cc.main, expected_exit_code=os.EX_DATAERR)
+
+    def test_afterdate_option_no_date(self):
+        argv = ['subscription-manager', 'list', '--all', '--available', '--afterdate']
+        # Error code of 2 is expected from optparse in this case.
+        self._test_afterdate_option(argv, self.cc.main, expected_exit_code=2)
+
+    def test_afterdate_option_missing_options(self):
+        # Just missing "available"
+        argv = ['subscription-manager', 'list', '--afterdate', self.valid_date, '--all']
+        self._test_afterdate_option(argv, self.cc.main, expected_exit_code=os.EX_USAGE)
+
+        # Missing both
+        argv = ['subscription-manager', 'list', '--afterdate', self.valid_date]
+        self._test_afterdate_option(argv, self.cc.main, expected_exit_code=os.EX_USAGE)
+
+    def test_afterdate_option_with_ondate(self):
+        argv = ['subscription-manager', 'list', '--afterdate', self.valid_date, '--ondate',
+            self.valid_date]
+        self._test_afterdate_option(argv, self.cc.main, expected_exit_code=os.EX_USAGE)
+
+    @patch('subscription_manager.managerlib.get_available_entitlements')
+    def test_afterdate_option_valid(self, es):
+        def create_pool_list(*args, **kwargs):
+            return [{'productName': 'dummy-name',
+                     'productId': 'dummy-id',
+                     'providedProducts': [],
+                     'id': '888888888888',
+                     'management_enabled': True,
+                     'attributes': [{'name': 'is_virt_only',
+                                     'value': 'false'}],
+                     'pool_type': 'Some Type',
+                     'quantity': '4',
+                     'service_level': '',
+                     'service_type': '',
+                     'contractNumber': '5',
+                     'multi-entitlement': 'false',
+                     'startDate': '',
+                     'endDate': '',
+                     'suggested': '2'}]
+        es.return_value = create_pool_list()
+
+        argv = ['subscription-manager', 'list', '--all', '--available', '--afterdate', self.valid_date]
+        self._test_afterdate_option(argv, self.cc.main, should_exit=False)
 
     @patch('subscription_manager.managerlib.get_available_entitlements')
     def test_none_wrap_available_pool_id(self, mget_ents):
@@ -432,6 +645,7 @@ class TestListCommand(TestCliProxyCommand):
                      'service_type': '',
                      'contractNumber': '5',
                      'multi-entitlement': 'false',
+                     'startDate': '',
                      'endDate': '',
                      'suggested': '2'}]
         mget_ents.return_value = create_pool_list()
@@ -652,6 +866,14 @@ class TestReposCommand(TestCliCommand):
         argv_patcher.start()
         self.addCleanup(argv_patcher.stop)
         self.cc.cp = Mock()
+        syspurpose_patch = patch('subscription_manager.syspurposelib.SyncedStore')
+        self.mock_sp_store = syspurpose_patch.start()
+        self.mock_sp_store, self.mock_sp_store_contents = set_up_mock_sp_store(self.mock_sp_store)
+        self.addCleanup(syspurpose_patch.stop)
+        server_cache_patcher = patch('subscription_manager.repolib.ServerCache')
+        self.mock_server_cache = server_cache_patcher.start()
+        self.mock_server_cache._write_cache_file = MagicMock()
+        self.addCleanup(server_cache_patcher.stop)
 
     def check_output_for_repos(self, output, repos):
         """
@@ -742,14 +964,16 @@ class TestReposCommand(TestCliCommand):
         self.cc.main(["--list-enabled"])
         self.cc._validate_options()
 
-        repos = [Repo("x", [("enabled", "1")]), Repo("y", [("enabled", "0")]), Repo("z", [("enabled", "0")])]
+        repos = [Repo("x", [("enabled", "1")]), Repo("y", [("enabled", "0")]), Repo("z", [("enabled", "0")]),
+                 Repo("a", [("enabled", "false")]), Repo("b", [("enabled", "False")]), Repo("c", [("enabled", "true")])
+                 ]
         mock_invoker.return_value.get_repos.return_value = repos
 
         with Capture() as cap:
             self.cc._do_command()
 
         result = self.check_output_for_repos(cap.out, repos)
-        self.assertEqual((True, False, False), result)
+        self.assertEqual((True, False, False, False, False, True), result)
 
     @patch("subscription_manager.managercli.RepoActionInvoker")
     def test_list_disabled(self, mock_invoker):
@@ -797,8 +1021,9 @@ class TestReposCommand(TestCliCommand):
         self.cc.use_overrides = True
         self.cc._set_repo_status(repos, repolib_instance, items)
 
-        expected_overrides = [{'contentLabel': i, 'name': 'enabled', 'value':
-            '0'} for (_action, i) in items]
+        expected_overrides = [{'contentLabel': i, 'name': 'enabled', 'value': '0'} for (_action, i) in items]
+        metadata_overrides = [{'contentLabel': i, 'name': 'enabled_metadata', 'value': '0'} for (_action, i) in items]
+        expected_overrides.extend(metadata_overrides)
 
         # The list of overrides sent to setContentOverrides is really a set of
         # dictionaries (since we don't know the order of the overrides).
@@ -820,11 +1045,11 @@ class TestReposCommand(TestCliCommand):
         self.cc.use_overrides = True
         self.cc._set_repo_status(repos, repolib_instance, items)
 
-        expected_overrides = [{'contentLabel': i.id, 'name': 'enabled', 'value':
-            '0'} for i in repos]
+        expected_overrides = [{'contentLabel': i.id, 'name': 'enabled', 'value': '0'} for i in repos]
+        metadata_overrides = [{'contentLabel': i.id, 'name': 'enabled_metadata', 'value': '0'} for i in repos]
+        expected_overrides.extend(metadata_overrides)
         match_dict_list = Matcher(self.assert_items_equals, expected_overrides)
-        self.cc.cp.setContentOverrides.assert_called_once_with('fake_id',
-                match_dict_list)
+        self.cc.cp.setContentOverrides.assert_called_once_with('fake_id', match_dict_list)
         self.assertTrue(repolib_instance.update.called)
 
     @patch("subscription_manager.managercli.RepoActionInvoker")
@@ -840,8 +1065,11 @@ class TestReposCommand(TestCliCommand):
 
         expected_overrides = [
             {'contentLabel': 'zebra', 'name': 'enabled', 'value': '0'},
+            {'contentLabel': 'zebra', 'name': 'enabled_metadata', 'value': '0'},
             {'contentLabel': 'zoo', 'name': 'enabled', 'value': '1'},
-            {'contentLabel': 'zip', 'name': 'enabled', 'value': '1'}
+            {'contentLabel': 'zoo', 'name': 'enabled_metadata', 'value': '1'},
+            {'contentLabel': 'zip', 'name': 'enabled', 'value': '1'},
+            {'contentLabel': 'zip', 'name': 'enabled_metadata', 'value': '1'}
         ]
         match_dict_list = Matcher(self.assert_items_equals, expected_overrides)
         self.cc.cp.setContentOverrides.assert_called_once_with('fake_id',
@@ -861,8 +1089,11 @@ class TestReposCommand(TestCliCommand):
 
         expected_overrides = [
             {'contentLabel': 'zebra', 'name': 'enabled', 'value': '1'},
+            {'contentLabel': 'zebra', 'name': 'enabled_metadata', 'value': '1'},
             {'contentLabel': 'zoo', 'name': 'enabled', 'value': '0'},
-            {'contentLabel': 'zip', 'name': 'enabled', 'value': '0'}
+            {'contentLabel': 'zoo', 'name': 'enabled_metadata', 'value': '0'},
+            {'contentLabel': 'zip', 'name': 'enabled', 'value': '0'},
+            {'contentLabel': 'zip', 'name': 'enabled_metadata', 'value': '0'}
         ]
         match_dict_list = Matcher(self.assert_items_equals, expected_overrides)
         self.cc.cp.setContentOverrides.assert_called_once_with('fake_id',
@@ -881,15 +1112,18 @@ class TestReposCommand(TestCliCommand):
 
         expected_overrides = [
             {'contentLabel': 'zebra', 'name': 'enabled', 'value': '0'},
+            {'contentLabel': 'zebra', 'name': 'enabled_metadata', 'value': '0'},
             {'contentLabel': 'zoo', 'name': 'enabled', 'value': '0'},
-            {'contentLabel': 'zip', 'name': 'enabled', 'value': '0'}
+            {'contentLabel': 'zoo', 'name': 'enabled_metadata', 'value': '0'},
+            {'contentLabel': 'zip', 'name': 'enabled', 'value': '0'},
+            {'contentLabel': 'zip', 'name': 'enabled_metadata', 'value': '0'}
         ]
         match_dict_list = Matcher(self.assert_items_equals, expected_overrides)
         self.cc.cp.setContentOverrides.assert_called_once_with('fake_id',
                 match_dict_list)
         self.assertTrue(repolib_instance.update.called)
 
-    @patch("subscription_manager.managercli.RepoFile")
+    @patch("subscription_manager.managercli.YumRepoFile")
     def test_set_repo_status_when_disconnected(self, mock_repofile):
         self._inject_mock_invalid_consumer()
         mock_repofile_inst = mock_repofile.return_value
@@ -972,13 +1206,13 @@ class TestAttachCommand(TestCliProxyCommand):
             tempfile.mkstemp()
         ]
 
-        os.write(cls.tempfiles[0][0], "pool1 pool2   pool3 \npool4\npool5\r\npool6\t\tpool7\n  pool8\n\n\n")
+        os.write(cls.tempfiles[0][0], "pool1 pool2   pool3 \npool4\npool5\r\npool6\t\tpool7\n  pool8\n\n\n".encode('utf-8'))
         os.close(cls.tempfiles[0][0])
 
-        os.write(cls.tempfiles[1][0], "pool1 pool2   pool3 \npool4\npool5\r\npool6\t\tpool7\n  pool8\n\n\n")
+        os.write(cls.tempfiles[1][0], "pool1 pool2   pool3 \npool4\npool5\r\npool6\t\tpool7\n  pool8\n\n\n".encode('utf-8'))
         os.close(cls.tempfiles[1][0])
 
-        # The third temp file intentionally left empty for testing empty sets of data.
+        # The third temp file syspurposeionally left empty for testing empty sets of data.
         os.close(cls.tempfiles[2][0])
 
     @classmethod
@@ -1211,9 +1445,26 @@ class TestServiceLevelCommand(TestCliProxyCommand):
     command_class = managercli.ServiceLevelCommand
 
     def setUp(self):
+        syspurpose_patch = patch('syspurpose.files.SyncedStore')
+        sp_patch = syspurpose_patch.start()
+        self.addCleanup(sp_patch.stop)
         TestCliProxyCommand.setUp(self)
         self.cc.consumerIdentity = StubConsumerIdentity
         self.cc.cp = StubUEP()
+        # Set up syspurpose mocking, do not test functionality of other source tree.
+        from subscription_manager import syspurposelib
+
+        self.syspurposelib = syspurposelib
+        self.syspurposelib.USER_SYSPURPOSE = self.write_tempfile("{}").name
+
+        syspurpose_patch = patch('subscription_manager.syspurposelib.SyncedStore')
+        self.mock_sp_store = syspurpose_patch.start()
+        self.mock_sp_store, self.mock_sp_store_contents = set_up_mock_sp_store(self.mock_sp_store)
+        self.addCleanup(syspurpose_patch.stop)
+
+    def tearDown(self):
+        super(TestServiceLevelCommand, self).tearDown()
+        syspurposelib.USER_SYSPURPOSE = "/etc/rhsm/syspurpose/syspurpose.json"
 
     def test_main_server_url(self):
         server_url = "https://subscription.rhsm.redhat.com/subscription"
@@ -1232,18 +1483,26 @@ class TestServiceLevelCommand(TestCliProxyCommand):
     def test_org_requires_list_good(self):
         self.cc.main(["--org", "one", "--list"])
 
-    def test_service_level_not_supported(self):
-        self.cc.cp.setConsumer({})
-        try:
-            self.cc.set_service_level('JARJAR')
-        except SystemExit as e:
-            self.assertEqual(e.code, os.EX_UNAVAILABLE)
-        else:
-            self.fail("No Exception Raised")
-
     def test_service_level_supported(self):
         self.cc.cp.setConsumer({'serviceLevel': 'Jarjar'})
-        self.cc.set_service_level('JRJAR')
+        self.cc._set('JRJAR')
+
+    def test_service_level_creates_syspurpose_dir_and_file(self):
+        # create a mock /etc/rhsm/ directory, and set the value of a mock USER_SYSPURPOSE under that
+        mock_etc_rhsm_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, mock_etc_rhsm_dir)
+        mock_syspurpose_file = os.path.join(mock_etc_rhsm_dir, "syspurpose/syspurpose.json")
+        syspurposelib.USER_SYSPURPOSE = mock_syspurpose_file
+
+        self.cc.store = self.mock_sp_store()
+        self.cc.cp.setConsumer({'serviceLevel': 'Jarjar'})
+        self.cc._set('JRJAR')
+
+        self.cc.store.set.assert_has_calls([call("service_level_agreement", "JRJAR")])
+
+        # make sure the sla has been persisted in syspurpose.json:
+        contents = self.cc.store.get_local_contents()
+        self.assertEqual(contents.get("service_level_agreement"), "JRJAR")
 
 
 class TestReleaseCommand(TestCliProxyCommand):
@@ -1284,6 +1543,160 @@ class TestReleaseCommand(TestCliProxyCommand):
                 self._orig_do_command()
 
                 mock_repo_invoker.update.assert_called_with()
+
+
+class TestRoleCommand(TestCliCommand):
+    command_class = managercli.RoleCommand
+
+    def setUp(self):
+        syspurpose_patch = patch('syspurpose.files.SyncedStore')
+        sp_patch = syspurpose_patch.start()
+        self.addCleanup(sp_patch.stop)
+        super(TestRoleCommand, self).setUp(False)
+        self.cc = self.command_class()
+        self.cc.cp = StubUEP()
+        self.cc.cp.registered_consumer_info['role'] = None
+        self.cc.cp._capabilities = ["syspurpose"]
+
+    def test_wrong_options_syspurpose_role(self):
+        """It is possible to use --set or --unset options. It's not possible to use both of them together."""
+        self.cc.options = Mock()
+        self.cc.options.set = "Foo"
+        self.cc.options.unset = True
+        self.cc.options.to_add = False
+        try:
+            self.cc._validate_options()
+        except SystemExit as e:
+            self.assertEqual(e.code, os.EX_USAGE)
+
+    @patch("subscription_manager.syspurposelib.SyncedStore")
+    def test_main_no_args(self, mock_syspurpose):
+        """It is necessary to mock SyspurposeStore for test function of parent class"""
+        mock_syspurpose.read = Mock()
+        mock_syspurpose.read.return_value = Mock()
+        instance_syspurpose_store = mock_syspurpose.read.return_value
+        instance_syspurpose_store.local_contents = {'role': 'Foo'}
+
+        with patch.object(managercli.SyspurposeCommand, 'check_syspurpose_support', Mock(return_value=None)):
+            super(TestRoleCommand, self).test_main_no_args()
+
+    @patch("subscription_manager.syspurposelib.SyncedStore")
+    def test_main_empty_args(self, mock_syspurpose):
+        """It is necessary to mock SyspurposeStore for test function of parent class"""
+        mock_syspurpose.read = Mock()
+        mock_syspurpose.read.return_value = Mock()
+        instance_syspurpose_store = mock_syspurpose.read.return_value
+        instance_syspurpose_store.local_contents = {'role': 'Foo'}
+
+        with patch.object(managercli.SyspurposeCommand, 'check_syspurpose_support', Mock(return_value=None)):
+            super(TestRoleCommand, self).test_main_empty_args()
+
+    @patch("subscription_manager.syspurposelib.SyncedStore")
+    @patch("subscription_manager.syspurposelib.SyspurposeSyncActionCommand")
+    def test_display_valid_syspurpose_role(self, mock_syspurpose_sync, mock_syspurpose):
+        mock_syspurpose.read = Mock()
+        mock_syspurpose.read.return_value = Mock()
+        instance_syspurpose_store = mock_syspurpose.read.return_value
+        instance_syspurpose_store.contents = {'role': 'Foo'}
+
+        self.cc.options = Mock(spec=['set', 'unset'])
+        self.cc.options.set = None
+        self.cc.options.unset = False
+
+        mock_syspurpose_sync.return_value = Mock()
+        instance_mock_syspurpose_sync = mock_syspurpose_sync.return_value
+
+        mock_sync_result = Mock()
+        mock_sync_result.result = {"role": "Foo"}
+        instance_mock_syspurpose_sync.perform = Mock(return_value=({}, mock_sync_result))
+
+        with Capture() as cap:
+            self.cc._do_command()
+        self.assertIn("Current Role: Foo", cap.out)
+
+    @patch("subscription_manager.syspurposelib.SyncedStore")
+    def test_display_none_syspurpose_role(self, mock_syspurpose):
+        mock_syspurpose.read = Mock()
+        mock_syspurpose.read.return_value = Mock()
+        instance_syspurpose_store = mock_syspurpose.read.return_value
+        instance_syspurpose_store.contents = {'role': None}
+
+        self.cc.options = Mock(spec=['set', 'unset'])
+        self.cc.options.set = None
+        self.cc.options.unset = False
+        with Capture() as cap:
+            self.cc._do_command()
+        self.assertIn("Role not set", cap.out)
+
+    @patch("subscription_manager.syspurposelib.SyncedStore")
+    def test_display_nonexisting_syspurpose_role(self, mock_syspurpose):
+        mock_syspurpose.read = Mock()
+        mock_syspurpose.read.return_value = Mock()
+        instance_syspurpose_store = mock_syspurpose.read.return_value
+        instance_syspurpose_store.contents = {}
+
+        self.cc.options = Mock(spec=['set', 'unset'])
+        self.cc.options.set = None
+        self.cc.options.unset = False
+
+        with Capture() as cap:
+            self.cc._do_command()
+        self.assertIn("Role not set.", cap.out)
+
+    @patch("subscription_manager.syspurposelib.SyncedStore")
+    @patch("subscription_manager.syspurposelib.SyspurposeSyncActionCommand")
+    def test_setting_syspurpose_role(self, mock_syspurpose_sync, mock_syspurpose):
+        mock_syspurpose.read = Mock()
+        mock_syspurpose.read.return_value = Mock()
+        instance_syspurpose_store = mock_syspurpose.read.return_value
+        instance_syspurpose_store.contents = {}
+        instance_syspurpose_store.set = MagicMock(return_value=True)
+        instance_syspurpose_store.write = MagicMock(return_value=None)
+        instance_syspurpose_store.get_cached_contents = Mock(return_value={"role": "Foo"})
+
+        mock_syspurpose_sync.return_value = Mock()
+        mock_syspurpose.return_value = instance_syspurpose_store
+        instance_mock_syspurpose_sync = mock_syspurpose_sync.return_value
+        instance_mock_syspurpose_sync.perform = Mock(return_value=({}, {"role": "Foo"}))
+
+        self.cc.options = Mock(spec=['set', 'unset'])
+        self.cc.options.set = 'Foo'
+        self.cc.options.unset = False
+        # Effectively mock out the store used, force it to be our mock here.
+        self.cc.store = instance_syspurpose_store
+
+        with Capture() as cap:
+            self.cc._do_command()
+
+        self.assertIn('role set to "Foo"', cap.out)
+        instance_syspurpose_store.set.assert_called_once_with('role', 'Foo')
+        instance_syspurpose_store.sync.assert_called_once()
+
+    @patch("subscription_manager.syspurposelib.SyncedStore")
+    @patch("subscription_manager.syspurposelib.SyspurposeSyncActionCommand")
+    def test_unsetting_syspurpose_role(self, mock_syspurpose_sync, mock_syspurpose):
+        mock_syspurpose.read = Mock()
+        mock_syspurpose.read.return_value = Mock()
+        instance_syspurpose_store = mock_syspurpose.read.return_value
+        instance_syspurpose_store.contents = {'role': 'Foo'}
+        instance_syspurpose_store.unset = MagicMock(return_value=True)
+        instance_syspurpose_store.write = MagicMock(return_value=None)
+        instance_syspurpose_store.get_cached_contents = Mock(return_value={})
+
+        mock_syspurpose_sync.return_value = Mock()
+        instance_mock_syspurpose_sync = mock_syspurpose_sync.return_value
+        instance_mock_syspurpose_sync.perform = Mock(return_value=({}, {"role": ""}))
+
+        self.cc.store = instance_syspurpose_store
+        self.cc.options = Mock(spec=['set', 'unset'])
+        self.cc.options.set = None
+        self.cc.options.unset = True
+        with Capture() as cap:
+            self.cc._do_command()
+
+        self.assertIn("role unset", cap.out)
+        instance_syspurpose_store.unset.assert_called_once_with('role')
+        instance_syspurpose_store.sync.assert_called_once()
 
 
 class TestVersionCommand(TestCliCommand):
@@ -1464,7 +1877,11 @@ class TestSystemExit(unittest.TestCase):
                 managercli.system_exit(1, msgs)
             except SystemExit:
                 pass
-        self.assertEqual("%s\n" % msgs[0].encode("utf8"), cap.err)
+        if six.PY2:
+            captured = cap.err.decode('utf-8')
+        else:
+            captured = cap.err
+        self.assertEqual(u"%s\n" % msgs[0], captured)
 
     def test_msg_and_exception_str(self):
         class StrException(Exception):
@@ -1560,6 +1977,8 @@ class HandleExceptionTests(unittest.TestCase):
             self.assertEqual(e.code, os.EX_SOFTWARE)
 
     def test_he_ssl_wrong_host(self):
+        if not six.PY2:
+            raise SkipTest("M2Crypto-specific interface. Not used with Python 3.")
         e = SSL.Checker.WrongHost("expectedHost.example.com",
                                    "actualHost.example.com",
                                    "subjectAltName")
@@ -1683,6 +2102,7 @@ class TestColumnize(unittest.TestCase):
 
     @patch('subscription_manager.printing_utils.get_terminal_width')
     def test_columnize_with_small_term(self, term_width_mock):
+        term_width_mock.return_value = None
         result = columnize(["Hello Hello Hello Hello:", "Foo Foo Foo Foo:"],
                 echo_columnize_callback, "This is a testing string", "This_is_another_testing_string")
         expected = 'Hello\nHello\nHello\nHello\n:     This\n      is a\n      ' \

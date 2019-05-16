@@ -14,25 +14,28 @@ from __future__ import print_function, division, absolute_import
 # Red Hat trademarks are not licensed under GPLv2. No permission is
 # granted to use or replicate Red Hat trademarks that are incorporated
 # in this software or its documentation.
-import fnmatch
 import os
+import sys
 import re
 import subprocess
 
 from glob import glob
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
+from setuptools.command.install import install as _install
 
 
 from distutils import log
 from distutils.command.install_data import install_data as _install_data
-from distutils.command.install import install as _install
 from distutils.command.build import build as _build
-from distutils.command.clean import clean as _clean
 from distutils.command.build_py import build_py as _build_py
-from distutils.dir_util import remove_tree
 
-from build_ext import i18n, lint, template
-from build_ext.utils import Utils
+# Note that importing build_ext alone won't be enough to make certain tasks (like lint) work
+# those tasks require that some dependencies (e.g. lxml) be installed.  Munging the syspath
+# here is just so that setup.py will be able to load and run in Jenkins jobs and RPM builds
+# that don't set up a proper development environment.
+build_ext_home = os.path.abspath(os.path.join(os.path.dirname(__file__), "./build_ext"))
+sys.path.append(build_ext_home)
+from build_ext import i18n, lint, template, utils
 
 
 # subclass build_py so we can generate
@@ -52,10 +55,15 @@ class rpm_version_release_build_py(_build_py):
 
     def finalize_options(self):
         _build_py.finalize_options(self)
-        self.set_undefined_options('build', ('rpm_version', 'rpm_version'), ('gtk_version', 'gtk_version'))
+        self.set_undefined_options(
+            'build',
+            ('rpm_version', 'rpm_version'),
+            ('gtk_version', 'gtk_version')
+        )
 
     def run(self):
-        log.info("Building with GTK_VERSION=%s and RPM_VERSION=%s" % (self.gtk_version, self.rpm_version))
+        log.debug("Building with GTK_VERSION=%s, RPM_VERSION=%s" %
+                 (self.gtk_version, self.rpm_version))
         _build_py.run(self)
         # create a "version.py" that includes the rpm version
         # info passed to our new build_py args
@@ -78,44 +86,37 @@ class rpm_version_release_build_py(_build_py):
                     raise
 
 
-class clean(_clean):
-    def initialize_options(self):
-        self.egg_base = None
-        _clean.initialize_options(self)
-
-    def finalize_options(self):
-        self.set_undefined_options('egg_info', ('egg_base', 'egg_base'))
-        _clean.finalize_options(self)
-
-    def run(self):
-        if self.all:
-            for f in glob(os.path.join(self.egg_base, '*.egg-info')):
-                log.info("removing %s" % f)
-                remove_tree(f, dry_run=self.dry_run)
-        _clean.run(self)
-
-
 class install(_install):
     user_options = _install.user_options + [
         ('gtk-version=', None, 'GTK version this is built for'),
         ('rpm-version=', None, 'version and release of the RPM this is built for'),
-        ('with-systemd=', None, 'whether to install w/ systemd support or not')]
+        ('with-systemd=', None, 'whether to install w/ systemd support or not'),
+        ('with-subman-gui=', None, 'whether to install subman GUI or not'),
+        ('with-cockpit-desktop-entry=', None, 'whether to install desktop entry for subman cockpit plugin or not')
+        ]
 
     def initialize_options(self):
         _install.initialize_options(self)
         self.rpm_version = None
         self.gtk_version = None
         self.with_systemd = None
+        self.with_subman_gui = None
+        self.with_cockpit_desktop_entry = None
 
     def finalize_options(self):
         _install.finalize_options(self)
-        self.set_undefined_options('build', ('rpm_version', 'rpm_version'), ('gtk_version', 'gtk_version'))
+        self.set_undefined_options(
+            'build',
+            ('rpm_version', 'rpm_version'),
+            ('gtk_version', 'gtk_version')
+        )
 
 
 class build(_build):
     user_options = _build.user_options + [
         ('gtk-version=', None, 'GTK version this is built for'),
-        ('rpm-version=', None, 'version and release of the RPM this is built for')]
+        ('rpm-version=', None, 'version and release of the RPM this is built for')
+    ]
 
     def initialize_options(self):
         _build.initialize_options(self)
@@ -135,7 +136,7 @@ class build(_build):
         try:
             cmd = ["git", "describe"]
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-            output = process.communicate()[0].strip()
+            output = process.communicate()[0].decode('utf-8').strip()
             if output.startswith(self.git_tag_prefix):
                 return output[len(self.git_tag_prefix):]
         except OSError:
@@ -145,15 +146,18 @@ class build(_build):
 
     def get_gtk_version(self):
         cmd = ['rpm', '--eval=%dist']
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-        output = process.communicate()[0].strip()
+        try:
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        except:
+            return "3"  # in cases where we can't use RPM to discover, assume GTK3
+        output = process.communicate()[0].decode('utf-8').strip()
         if re.search('el6', output):
             return "2"
         return "3"
 
     def has_po_files(self):
         try:
-            next(Utils.find_files_of_type('po', '*.po'))
+            next(utils.Utils.find_files_of_type('po', '*.po'))
             return True
         except StopIteration:
             return False
@@ -166,46 +170,56 @@ class install_data(_install_data):
     or desktop files with merged translations) or an entire tree of data files.
     """
     user_options = _install_data.user_options + [
-        ('with-systemd=', None, 'whether to install w/ systemd support or not')]
+        ('with-systemd=', None, 'whether to install w/ systemd support or not'),
+        ('with-subman-gui=', None, 'whether to install subman GUI or not'),
+        ('with-cockpit-desktop-entry=', None, 'whether to install desktop entry for subman cockpit plugin or not')
+        ]
 
     def initialize_options(self):
         _install_data.initialize_options(self)
-        self.transforms = None
         self.with_systemd = None
+        self.with_subman_gui = None
+        self.with_cockpit_desktop_entry = None
         # Can't use super() because Command isn't a new-style class.
 
     def finalize_options(self):
         _install_data.finalize_options(self)
-        if self.transforms is None:
-            self.transforms = []
         self.set_undefined_options('install', ('with_systemd', 'with_systemd'))
+        self.set_undefined_options('install', ('with_subman_gui', 'with_subman_gui'))
+        self.set_undefined_options('install', ('with_cockpit_desktop_entry', 'with_cockpit_desktop_entry'))
         if self.with_systemd is None:
             self.with_systemd = True  # default to True
         else:
             self.with_systemd = self.with_systemd == 'true'
+        if self.with_subman_gui is None:
+            self.with_subman_gui = False  # default to False
+        else:
+            self.with_subman_gui = self.with_subman_gui == 'true'
+        # Enable creating desktop entry for cockpit plugin only in case that subman gui will not be
+        # installed
+        if self.with_subman_gui is False:
+            if self.with_cockpit_desktop_entry is None:
+                self.with_cockpit_desktop_entry = True  # default to True
+            else:
+                self.with_cockpit_desktop_entry = self.with_cockpit_desktop_entry == 'true'
+        else:
+            self.with_cockpit_desktop_entry = False
 
     def run(self):
         self.add_messages()
-        self.add_desktop_files()
-        self.add_icons()
+        if self.with_subman_gui:
+            self.add_desktop_files()
+            self.add_icons()
+            self.add_gui_doc_files()
+        if self.with_cockpit_desktop_entry:
+            self.add_cockpit_desktop_entry()
+            self.add_icons()
         self.add_dbus_service_files()
         self.add_systemd_services()
         _install_data.run(self)
-        self.transform_files()
 
     def join(self, *args):
         return os.path.normpath(os.path.join(*args))
-
-    def transform_files(self):
-        for file_glob, new_extension in self.transforms:
-            matches = fnmatch.filter(self.outfiles, file_glob)
-            for f in matches:
-                out_dir = os.path.dirname(f)
-                out_name = os.path.basename(f).split('.')[0] + new_extension
-                dest = self.join(out_dir, out_name)
-                if os.path.exists(dest):
-                    os.remove(dest)
-                self.move_file(f, dest)
 
     def add_messages(self):
         for lang in os.listdir(self.join('build', 'locale')):
@@ -213,10 +227,16 @@ class install_data(_install_data):
             lang_file = self.join('build', 'locale', lang, 'LC_MESSAGES', 'rhsm.mo')
             self.data_files.append((lang_dir, [lang_file]))
 
-    def add_desktop_files(self):
+    def __add_desktop_entry(self, desktop_entry_file):
         desktop_dir = self.join('share', 'applications')
-        desktop_file = self.join('build', 'applications', 'subscription-manager-gui.desktop')
+        desktop_file = self.join('build', 'applications', desktop_entry_file)
         self.data_files.append((desktop_dir, [desktop_file]))
+
+    def add_cockpit_desktop_entry(self):
+        self.__add_desktop_entry('subscription-manager-cockpit.desktop')
+
+    def add_desktop_files(self):
+        self.__add_desktop_entry('subscription-manager-gui.desktop')
 
         # Installing files outside of the "prefix" with setuptools looks to be flakey:
         # See https://github.com/pypa/setuptools/issues/460.  However, this seems to work
@@ -225,6 +245,20 @@ class install_data(_install_data):
         autostart_dir = self.join('/etc', 'xdg', 'autostart')
         autostart_file = self.join('build', 'autostart', 'rhsm-icon.desktop')
         self.data_files.append((autostart_dir, [autostart_file]))
+
+    def add_gui_doc_files(self):
+        """
+        Add documentation for subscription-manager-gui and rhsm-icon
+        """
+        self.data_files.append(('share/gnome/help/subscription-manager/C', glob('docs/*.xml')))
+        self.data_files.append(('share/gnome/help/subscription-manager/C/figures', glob('docs/figures/*.png')))
+        self.data_files.append(('share/omf/subscription-manager', glob('docs/*.omf')))
+        # Add manual pages for subman-gui na rhsm-icon
+        data_files = dict(self.data_files)
+        man8_pages = data_files['share/man/man8']
+        man8_pages = man8_pages.union(set(['man/subscription-manager-gui.8', 'man/rhsm-icon.8']))
+        data_files['share/man/man8'] = man8_pages
+        self.data_files = [(item, value) for item, value in data_files.items()]
 
     def add_dbus_service_files(self):
         dbus_service_directory = self.join('share', 'dbus-1', 'system-services')
@@ -252,11 +286,28 @@ class install_data(_install_data):
             self.data_files.append((icon_dir, icon_source_files))
 
 
+class GettextWithOptParse(i18n.Gettext):
+    def find_py(self):
+        # Can't use super since we're descended from a old-style class
+        files = i18n.Gettext.find_py(self)
+
+        # We need to grab some strings out of optparse for translation
+        import optparse
+        optparse_source = "%s.py" % os.path.splitext(optparse.__file__)[0]
+        if not os.path.exists(optparse_source):
+            raise RuntimeError("Could not find optparse.py at %s" % optparse_source)
+        files.append(optparse_source)
+        return files
+
+
 setup_requires = []
 
 install_requires = [
         'six',
-        'kitchen',
+        'iniparse',
+        'python-dateutil',
+        'ethtool',
+        'dbus-python',
     ]
 
 test_require = [
@@ -266,13 +317,12 @@ test_require = [
       'nose-randomly',
       'coverage',
       'polib',
-      'freezegun',
       'flake8',
       'lxml',
     ] + install_requires + setup_requires
 
 cmdclass = {
-    'clean': clean,
+    'clean': utils.clean,
     'install': install,
     'install_data': install_data,
     'build': build,
@@ -281,53 +331,49 @@ cmdclass = {
     'build_template': template.BuildTemplate,
     'update_trans': i18n.UpdateTrans,
     'uniq_trans': i18n.UniqTrans,
-    'gettext': i18n.Gettext,
+    'gettext': GettextWithOptParse,
     'lint': lint.Lint,
     'lint_glade': lint.GladeLint,
     'lint_rpm': lint.RpmLint,
     'flake8': lint.PluginLoadingFlake8
 }
 
-transforms = [
-    ('*/rhsmcertd-worker.py', ''),
-]
-
-try:
-    cmd = ['rpm', '--eval=%_libexecdir']
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    libexecdir = process.communicate()[0].strip()
-except OSError:
-    libexecdir = 'libexec'
-
 setup(
     name="subscription-manager",
-    version='1.20.1',
+    version='1.25.5',
     url="http://www.candlepinproject.org",
     description="Manage subscriptions for Red Hat products.",
     license="GPLv2",
     author="Adrian Likins",
     author_email="alikins@redhat.com",
     cmdclass=cmdclass,
-    packages=find_packages('src', exclude=['subscription_manager.gui.firstboot.*', '*.ga_impls', '*.ga_impls.*', '*.plugin.ostree', '*.services.examples']),
+    packages=find_packages('src', exclude=['subscription_manager.gui.firstboot.*', '*.ga_impls', '*.ga_impls.*', '*.plugin.ostree', '*.services.examples', 'syspurpose*']),
     package_dir={'': 'src'},
     package_data={
         'subscription_manager.gui': ['data/glade/*.glade', 'data/ui/*.ui', 'data/icons/*.svg'],
     },
+    entry_points={
+        'console_scripts': [
+            'subscription-manager = subscription_manager.scripts.subscription_manager:main',
+            'rhn-migrate-classic-to-rhsm = subscription_manager.scripts.rhn_migrate_classic_to_rhsm:main',
+            'rct = subscription_manager.scripts.rct:main',
+            'rhsm-debug = subscription_manager.scripts.rhsm_debug:main',
+            'rhsm-facts-service = subscription_manager.scripts.rhsm_facts_service:main',
+            'rhsm-service = subscription_manager.scripts.rhsm_service:main',
+            'rhsmcertd-worker = subscription_manager.scripts.rhsmcertd_worker:main',
+            'rhsmd = subscription_manager.scripts.rhsm_d:main',
+        ],
+        'gui_scripts': [
+            'subscription-manager-gui = subscription_manager.scripts.subscription_manager_gui:main',
+        ],
+    },
     data_files=[
-        ('sbin', ['bin/subscription-manager', 'bin/subscription-manager-gui', 'bin/rhn-migrate-classic-to-rhsm']),
-        ('bin', ['bin/rct', 'bin/rhsm-debug']),
-        (libexecdir, ['src/daemons/rhsmcertd-worker.py', 'bin/rhsm-facts-service', 'bin/rhsm-service']),
         # sat5to6 is packaged separately
-        ('share/man/man8', set(glob('man/*.8')) - set(['man/sat5to6.8'])),
+        # man pages for gui are added in add_gui_doc_files(), when GUI package is created
+        ('share/man/man8', set(glob('man/*.8')) - set(['man/sat5to6.8']) - set(['man/subscription-manager-gui.8', 'man/rhsm-icon.8'])),
         ('share/man/man5', glob('man/*.5')),
-        ('share/gnome/help/subscription-manager/C', glob('docs/*.xml')),
-        ('share/gnome/help/subscription-manager/C/figures', glob('docs/figures/*.png')),
-        ('share/omf/subscription-manager', glob('docs/*.omf')),
     ],
     command_options={
-        'install_data': {
-            'transforms': ('setup.py', transforms),
-        },
         'egg_info': {
             'egg_base': ('setup.py', os.curdir),
         },
@@ -339,5 +385,7 @@ setup(
     setup_requires=setup_requires,
     install_requires=install_requires,
     tests_require=test_require,
+    ext_modules=[Extension('rhsm._certificate', ['src/certificate.c'],
+                           libraries=['ssl', 'crypto'])],
     test_suite='nose.collector',
 )

@@ -22,10 +22,18 @@ import logging
 
 from pyanaconda.ui.communication import hubQ
 from pyanaconda.ui.gui.spokes import NormalSpoke
-from pyanaconda.ui.common import FirstbootOnlySpokeMixIn
 from pyanaconda.ui.categories.system import SystemCategory
+from pyanaconda.ui.categories.user_settings import UserSettingsCategory
 from pyanaconda.ui.gui.utils import really_hide
+from pyanaconda.flags import flags
+try:
+    from pyanaconda.constants import ANACONDA_ENVIRON
+except ImportError:
+    from pyanaconda.core.constants import ANACONDA_ENVIRON
 
+from subscription_manager import logutil
+
+logutil.init_logger()
 log = logging.getLogger(__name__)
 
 from subscription_manager import ga_loader
@@ -49,14 +57,28 @@ __all__ = ["RHSMSpoke"]
 configure_gettext()
 
 
-class RHSMSpoke(FirstbootOnlySpokeMixIn, NormalSpoke):
+class RHSMSpoke(NormalSpoke):
+    """
+    Spoke used for registration of system in Anaconda or Initial Setup
+    """
     buildrObjects = ["RHSMSpokeWindow"]
     mainWidgetName = "RHSMSpokeWindow"
     uiFile = "rhsm_gui.ui"
     helpFile = "SubscriptionManagerSpoke.xml"
-    category = SystemCategory
+    # Display our spoke in second hub for testing purpose. There is also
+    # no more space in first hub. See this bug report:
+    # https://bugzilla.redhat.com/show_bug.cgi?id=1584160
+    if ANACONDA_ENVIRON in flags.environs:
+        category = UserSettingsCategory
+    else:
+        category = SystemCategory
     icon = "subscription-manager"
     title = "_Subscription Manager"
+
+    @classmethod
+    def should_run(cls, environment, data):
+        """Run this spoke for Anaconda and InitialSetup"""
+        return True
 
     def __init__(self, data, storage, payload, instclass):
         NormalSpoke.__init__(self, data, storage, payload, instclass)
@@ -202,7 +224,7 @@ class RHSMSpoke(FirstbootOnlySpokeMixIn, NormalSpoke):
         """When the spoke is left, this can run anything that needs to happen.
 
         Wait for any async processing to complete."""
-        self.register_widget.async.block_until_complete()
+        self.register_widget.async_backend.block_until_complete()
 
     def _on_register_status_change(self, obj, params):
         status = obj.get_property('register-status')

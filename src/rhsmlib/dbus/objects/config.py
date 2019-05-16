@@ -16,6 +16,9 @@ from __future__ import print_function, division, absolute_import
 import dbus
 import logging
 import six
+import rhsm
+
+from subscription_manager.i18n import Locale
 
 from rhsmlib.dbus import constants, base_object, util, dbus_utils
 from rhsmlib.services.config import Config
@@ -32,13 +35,29 @@ class ConfigDBusObject(base_object.BaseObject):
         self.config = Config(parser)
         super(ConfigDBusObject, self).__init__(conn=conn, object_path=object_path, bus_name=bus_name)
 
+    @util.dbus_service_signal(
+        constants.CONFIG_INTERFACE,
+        signature=''
+    )
+    @util.dbus_handle_exceptions
+    def ConfigChanged(self):
+        """
+        Signal fired, when config is created/deleted/changed
+        :return: None
+        """
+        log.debug("D-Bus signal %s emitted" % constants.CONFIG_INTERFACE)
+        return None
+
     @util.dbus_service_method(
         constants.CONFIG_INTERFACE,
-        in_signature='sv')
+        in_signature='svs')
     @util.dbus_handle_exceptions
-    def Set(self, property_name, new_value, sender=None):
-        property_name = dbus_utils.dbus_to_python(property_name, str)
-        new_value = dbus_utils.dbus_to_python(new_value, str)
+    def Set(self, property_name, new_value, locale, sender=None):
+        property_name = dbus_utils.dbus_to_python(property_name, expected_type=str)
+        new_value = dbus_utils.dbus_to_python(new_value, expected_type=str)
+        locale = dbus_utils.dbus_to_python(locale, expected_type=str)
+        Locale.set(locale)
+
         section, _dot, property_name = property_name.partition('.')
 
         if not property_name:
@@ -49,10 +68,13 @@ class ConfigDBusObject(base_object.BaseObject):
 
     @util.dbus_service_method(
         constants.CONFIG_INTERFACE,
-        in_signature='',
+        in_signature='s',
         out_signature='a{sv}')
     @util.dbus_handle_exceptions
-    def GetAll(self, sender=None):
+    def GetAll(self, locale, sender=None):
+        locale = dbus_utils.dbus_to_python(locale, expected_type=str)
+        Locale.set(locale)
+
         d = dbus.Dictionary({}, signature='sv')
         for k, v in six.iteritems(self.config):
             d[k] = dbus.Dictionary({}, signature='ss')
@@ -63,13 +85,22 @@ class ConfigDBusObject(base_object.BaseObject):
 
     @util.dbus_service_method(
         constants.CONFIG_INTERFACE,
-        in_signature='s',
+        in_signature='ss',
         out_signature='v')
     @util.dbus_handle_exceptions
-    def Get(self, property_name, sender=None):
+    def Get(self, property_name, locale, sender=None):
+        locale = dbus_utils.dbus_to_python(locale, expected_type=str)
+        Locale.set(locale)
+
         section, _dot, property_name = property_name.partition('.')
 
         if property_name:
             return self.config[section][property_name]
         else:
             return dbus.Dictionary(self.config[section], signature='sv')
+
+    def reload(self):
+        parser = rhsm.config.initConfig("/etc/rhsm/rhsm.conf")
+        self.config = Config(parser)
+        log.debug("port: %s" % str(self.config["server"]["port"]))
+        log.debug("reloaded successfully")

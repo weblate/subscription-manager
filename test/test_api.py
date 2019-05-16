@@ -34,13 +34,17 @@ class RepoApiTest(SubManFixture):
         self.invoker = invoker_patcher.start()
         self.addCleanup(invoker_patcher.stop)
 
-        repo_file_patcher = patch("subscription_manager.api.repos.RepoFile", autospec=True)
+        repo_file_patcher = patch("subscription_manager.api.repos.YumRepoFile", autospec=True)
         self.repo_file = repo_file_patcher.start()
         self.addCleanup(repo_file_patcher.stop)
 
         uep_patcher = patch("rhsm.connection.UEPConnection", new=StubUEP)
         self.stub_uep = uep_patcher.start()
         self.addCleanup(uep_patcher.stop)
+
+        logging_patcher = patch("subscription_manager.api.logutil")
+        logging_patcher.start()
+        self.addCleanup(logging_patcher.stop)
 
     def test_disable_repo(self):
         repo_settings = {

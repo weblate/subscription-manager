@@ -27,6 +27,7 @@ import webbrowser
 import os
 import threading
 import time
+import socket
 
 import rhsm.config as config
 
@@ -40,8 +41,9 @@ from subscription_manager.entcertlib import EntCertActionInvoker
 from subscription_manager.repolib import YumPluginManager
 from rhsmlib.facts.hwprobe import ClassicCheck
 from rhsmlib.services import unregister
-from subscription_manager.utils import get_client_versions, get_server_versions, parse_baseurl_info, restart_virt_who
-from subscription_manager.utils import print_error
+from subscription_manager.utils import get_client_versions, get_server_versions, parse_baseurl_info, restart_virt_who, print_error
+
+from rhsm import utils as rhsm_utils
 
 from subscription_manager.gui import factsgui
 from subscription_manager.gui import messageWindow
@@ -69,8 +71,8 @@ log = logging.getLogger(__name__)
 
 cfg = config.initConfig()
 
-ONLINE_DOC_URL_TEMPLATE = "https://access.redhat.com/knowledge/docs/Red_Hat_Subscription_Management/?locale=%s"
-ONLINE_DOC_FALLBACK_URL = "https://access.redhat.com/knowledge/docs/Red_Hat_Subscription_Management/"
+ONLINE_DOC_URL_TEMPLATE = "https://access.redhat.com/documentation/%s/red_hat_subscription_management/"
+ONLINE_DOC_FALLBACK_URL = "https://access.redhat.com/documentation/en-us/red_hat_subscription_management/"
 
 # every GUI browser from https://docs.python.org/2/library/webbrowser.html with updates within last 2 years of writing
 PREFERRED_BROWSERS = [
@@ -97,7 +99,7 @@ class Backend(object):
     the UEP connection it contains can be modified/recreated and all
     components will have the updated connection.
 
-    This also serves as a common wrapper for certifcate directories and methods
+    This also serves as a common wrapper for certificate directories and methods
     to monitor those directories for changes.
     """
 
@@ -175,27 +177,65 @@ class MainWindow(widgets.SubmanBaseWidget):
                  auto_launch_registration=False):
         super(MainWindow, self).__init__()
 
-        # When proxy server is set in configuration and it is not
-        # possible to connect to proxy server, then open dialog
-        # for setting proxy server.
-        if not utils.test_proxy_reachability():
-            print_error(_("Proxy connection failed, please check your settings."))
-            error_dialog = messageWindow.ContinueDialog(_("Proxy connection failed, please check your settings."),
-                                                        self._get_window())
+        rhsm_cfg = config.initConfig()
+        proxy_server = rhsm_cfg.get("server", "proxy_hostname")
+        proxy_port = int(rhsm_cfg.get("server", "proxy_port") or config.DEFAULT_PROXY_PORT)
+
+        def show_proxy_error_dialog(proxy_auth_required=False):
+            """
+            When proxy server is set in configuration and it is not
+            possible to connect to proxy server, then open dialog
+            for setting proxy server.
+            """
+            if proxy_auth_required:
+                proxy_user = rhsm_cfg.get("server", "proxy_user")
+                proxy_password = rhsm_cfg.get("server", "proxy_password")
+                if proxy_user or proxy_password:
+                    err_msg = _("Wrong proxy username or password, please check your settings.")
+                else:
+                    err_msg = _("Proxy authentication required, please check your settings.")
+            else:
+                err_msg = _("Proxy connection failed, please check your settings.")
+            print_error(err_msg)
+            error_dialog = messageWindow.ContinueDialog(err_msg, self._get_window())
             error_dialog.connect("response", self._on_proxy_error_dialog_response)
             self.network_config_dialog = networkConfig.NetworkConfigDialog()
             # Sub-man gui will be terminated after saving settings and it is
             # necessary to start it once again.
             self.network_config_dialog.saveButton.connect("clicked", self._exit)
             self.network_config_dialog.cancelButton.connect("clicked", self._exit)
-            return
 
         self.backend = backend or Backend()
-        self.identity = require(IDENTITY)
+        cp = self.backend.cp_provider.get_consumer_auth_cp()
 
+        # allow specifying no_proxy via api or config
+        no_proxy = rhsm_cfg.get('server', 'no_proxy')
+        if no_proxy:
+            os.environ['no_proxy'] = no_proxy
+
+        rhsm_utils.fix_no_proxy()
+        log.debug('Environment variable NO_PROXY=%s will be used' % no_proxy)
+
+        # Don't check the proxy server if the hostname we aim to connect to is covered by no_proxy
+        if proxy_server and not urllib.request.proxy_bypass(rhsm_cfg.get('server', 'hostname')):
+            if not utils.test_proxy_reachability(proxy_server, proxy_port):
+                show_proxy_error_dialog()
+                return
+
+            try:
+                # Try to send to the simplest Rest API call to Candlepin server.
+                # This result will be used for getting version of Candlepin server.
+                # See self.log_server_version.
+                cp.supports_resource("status")
+            except socket.error as err:
+                # See https://tools.ietf.org/html/rfc7235#section-4.3
+                if "407 Proxy Authentication Required" in err.message:
+                    show_proxy_error_dialog(proxy_auth_required=True)
+                    return
+
+        self.identity = require(IDENTITY)
         log.debug("Client Versions: %s " % get_client_versions())
-        # Log the server version asynchronously
-        ga_GLib.idle_add(self.log_server_version, self.backend.cp_provider.get_consumer_auth_cp())
+        ga_GLib.idle_add(self.log_server_version, cp)
 
         settings = self.main_window.get_settings()
 
@@ -293,12 +333,12 @@ class MainWindow(widgets.SubmanBaseWidget):
         if auto_launch_registration and not self.registered():
             self._register_item_clicked(None)
 
-        enabled_yum_plugins = YumPluginManager.enable_yum_plugins()
+        enabled_yum_plugins = YumPluginManager.enable_pkg_plugins()
         if len(enabled_yum_plugins) > 0:
             messageWindow.InfoDialog(
                 YumPluginManager.warning_message(enabled_yum_plugins),
                 self._get_window(),
-                _("Warning - subscribtion-manager plugins were automatically enabled")
+                _("Warning - subscription-manager plugins were automatically enabled")
             )
 
     def registered(self):
@@ -469,7 +509,7 @@ class MainWindow(widgets.SubmanBaseWidget):
         if not response:
             log.debug("unregister prompt not confirmed. cancelling")
             return
-        log.info("Proceeding with un-registration: %s", self.identity.uuid)
+        log.debug("Proceeding with un-registration: %s", self.identity.uuid)
         self._perform_unregister()
 
     def _perform_unregister(self):
@@ -494,7 +534,7 @@ class MainWindow(widgets.SubmanBaseWidget):
         self.backend.cs.force_cert_check()
 
     def _unregister_item_clicked(self, widget):
-        log.info("Unregister button pressed, asking for confirmation.")
+        log.debug("Unregister button pressed, asking for confirmation.")
         prompt = messageWindow.YesNoDialog(
                 _("<b>Are you sure you want to unregister?</b>"),
                 self._get_window())
@@ -579,7 +619,7 @@ class MainWindow(widgets.SubmanBaseWidget):
     def _get_online_doc_url(self):
         lang, encoding = locale.getdefaultlocale()
         if lang is not None:
-            url = ONLINE_DOC_URL_TEMPLATE % (lang.replace("_", "-"))
+            url = ONLINE_DOC_URL_TEMPLATE % (lang.replace("_", "-").lower())
         else:
             url = ONLINE_DOC_FALLBACK_URL
         try:

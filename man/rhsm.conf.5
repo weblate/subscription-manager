@@ -69,7 +69,16 @@ proxy_hostname
 .RS 4
 Set this to a non\-blank value if
 \fBsubscription\-manager\fR
-should use a reverse proxy to access the subscription service\&. This sets the host for the reverse proxy\&. Overrides hostname from \fBHTTP_PROXY\fR and \fBHTTPS_PROXY\fR environment variables\&.
+should use a reverse proxy to access the subscription service\&. This sets the host for the reverse proxy\&. Overrides hostname from \fBHTTP_PROXY\fR and \fBHTTPS_PROXY\fR environment variables\&. This value
+.B should not
+contain the scheme to be used with the proxy (e.g. http or https)\&. To specify that use the
+.B proxy_scheme
+option\&.
+.RE
+.PP
+proxy_scheme
+.RS 4
+This sets the scheme for the reverse proxy when writing out the proxy to repo definitions\&. Set this to a non\-blank value if you want to specify the scheme used by your package manager for subscription\-manager managed repos\&. This defaults to "http"\&.
 .RE
 .PP
 proxy_port
@@ -77,6 +86,16 @@ proxy_port
 Set this to a non\-blank value if
 \fBsubscription\-manager\fR
 should use a reverse proxy to access the subscription service\&. This sets the port for the reverse proxy\&. Overrides port from \fBHTTP_PROXY\fR and \fBHTTPS_PROXY\fR environment variables\&.
+
+Please note that setting this to any value other than 3128 (depending on your SELinux configuration) will require an update to that policy.
+
+To add a local policy:
+
+# semanage port -a -t squid_port_t -p tcp <port number>
+
+To change the system back to look at 3128 port, just remove the policy:
+
+# semanage port -d -t squid_port_t -p tcp <port number>
 .RE
 .PP
 proxy_username
@@ -120,6 +139,11 @@ the full
 would be for example:
 .B https://sat6.example.com/pulp/repos
 \&.
+.RE
+.PP
+repomd_gpg_url
+.RS 4
+The URL of the GPG key that was used to sign this repository's metadata\&. The specified GPG key will be used in addition to any GPG keys defined by the entitlement\&.
 .RE
 .PP
 ca_cert_dir
@@ -169,7 +193,16 @@ Set to
 \fI1\fR
 if
 \fBrhsmcertd\fR
-should report the system\(cqs current package profile to the subscription service\&. This report helps the subscription service provide better errata notifications\&.
+should report the system's current package profile to the subscription service\&. This report helps the subscription service provide better errata notifications\&. If supported by the entitlement server, enabled repos, enabled modules, and packages present will be reported\&. This configuration also governs package profile reporting when the "dnf uploadprofile" command is executed\&.
+.RE
+.PP
+package_profile_on_trans
+.RS 4
+Set to
+\fI1\fR
+if the
+\fBdnf/yum subscription-manager plugin\fR
+should report the system's current package profile to the subscription service on execution of dnf/yum transactions (for example on package install)\&. This report helps the subscription service provide better errata notifications\&. If supported by the entitlement server, enabled repos, enabled modules, and packages present will be reported\&. The \fBreport_package_profile\fR option needs to also be set to 1 for this option to have any effect.
 .RE
 .PP
 pluginDir
@@ -180,6 +213,16 @@ The directory to search for subscription manager plug-ins
 pluginConfDir
 .RS 4
 The directory to search for plug-in configuration files
+.RE
+.PP
+auto_enable_yum_plugins
+.RS 4
+When this option is enabled, then yum/dnf plugins subscription-manager and product-id are enabled every-time subscription-manager or subscription-manager-gui is executed.
+.RE
+.PP
+inotify
+.RS 4
+Inotify is used for monitoring changes in directories with certificates. Currently only the /etc/pki/consumer directory is monitored by the rhsm.service. When this directory is mounted using a network file system without inotify notification support (e.g. NFS), then disabling inotify is strongly recommended. When inotify is disabled, periodical directory polling is used instead.
 .RE
 .SH "[RHSMCERTD] OPTIONS"
 .PP
@@ -200,6 +243,11 @@ splay
 1 to enable splay. 0 to disable splay. If enabled, this feature delays the initial auto attach and cert check by an amount between 0 seconds and the interval given for the action being delayed. For example if the
 .B certCheckInterval
 were set to 3 minutes, the initial cert check would begin somewhere between 2 minutes after start up (minimum delay) and 5 minutes after start up. This is useful to reduce peak load on the Satellite or entitlement service used by a large number of machines.
+.RE
+.PP
+disable
+.RS 4
+set to 1 to disable rhsmcertd operation entirely.
 .SH "[LOGGING] OPTIONS"
 .PP
 default_log_level

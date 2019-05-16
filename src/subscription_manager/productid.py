@@ -25,10 +25,8 @@ import rpm
 
 from rhsm.certificate import create_from_pem
 
-from subscription_manager.certdirectory import Directory
+from subscription_manager.certdirectory import Directory, DEFAULT_PRODUCT_CERT_DIR
 from subscription_manager.injection import PLUGIN_MANAGER, require
-
-from subscription_manager import rhelproduct
 
 from subscription_manager import utils
 from subscription_manager import repolib
@@ -328,13 +326,27 @@ class ProductManager(object):
 
         self.plugin_manager = require(PLUGIN_MANAGER)
 
+    def find_disabled_repos(self):
+        """Find repos disabled in redhat.repo"""
+        repo_file = repolib.YumRepoFile()
+        repo_file.read()
+
+        disabled_in_redhat_repo = []
+        for section in repo_file.sections():
+            repo = repo_file.section(section)
+
+            if not utils.is_true_value(repo.get('enabled', '0')):
+                disabled_in_redhat_repo.append(repo.id)
+
+        return disabled_in_redhat_repo
+
     def find_temp_disabled_repos(self, enabled):
         """Find repo from redhat.repo that have been disabled from cli."""
         yum_enabled = [x[1] for x in enabled]
 
         # Read the redhat.repo file so we can check if any of our
         # repos have been disabled by --disablerepo or another plugin.
-        repo_file = repolib.RepoFile()
+        repo_file = repolib.YumRepoFile()
         repo_file.read()
 
         enabled_in_redhat_repo = []
@@ -471,7 +483,7 @@ class ProductManager(object):
             # the write if so:
             if self._is_desktop(p):
                 if self._workstation_cert_exists():
-                    log.info("skipping obsolete desktop cert")
+                    log.debug("skipping obsolete desktop cert")
                     continue
 
             # See if the product cert already exists
@@ -606,7 +618,7 @@ class ProductManager(object):
                 has_workstation = True
             if self._is_desktop(product):
                 has_desktop = True
-        return (has_desktop and has_workstation)
+        return has_desktop and has_workstation
 
     # We should only delete productcerts if there are no
     # packages from that repo installed (not "active")
@@ -639,39 +651,32 @@ class ProductManager(object):
         log.debug("Checking for product certs to remove. Active include: %s",
                   active)
 
+        disabled_repos = self.find_disabled_repos()
+
         for cert in self.pdir.list():
-            p = cert.products[0]
-            prod_hash = p.id
+            product = cert.products[0]
+            prod_hash = product.id
+
+            # Protect all product certificates in /etc/pki/product-default
+            # See: BZ: 1526622
+            if cert.path.startswith(DEFAULT_PRODUCT_CERT_DIR):
+                log.debug('Skipping prod. cert.: %s in protected directory' % cert.path)
+                continue
 
             # FIXME: or if the productid.hs wasn't updated to reflect a new repo
             repos = self.db.find_repos(prod_hash)
 
-            delete_product_cert = True
-
-            # this is the core of a fix for rhbz #859197
-            #
-            # which is a scenario where we have rhel installed, a rhel cert installed,
-            # a rhel entitlement, a rhel enabled repo, yet no packages installed from
-            # that rhel repo. Aka, a system anaconda installed from a cloned repo
-            # perhaps. In that case, all the installed package think they came from
-            # that other repo (say, 'anaconda-repo'), so it looks like the rhel repo
-            # is not 'active'. So it ends up deleting the product cert for rhel since
-            # it appears it is not being used. It is kind of a strange case for the
-            # base os product cert, so we hardcode a special case here.
-            rhel_matcher = rhelproduct.RHELProductMatcher(p)
-            if rhel_matcher.is_rhel():
-                delete_product_cert = False
-
             # If productid database does not know about the the product,
             # ie, repo is None (basically, return from a db.content.get(),
-            # dont delete the cert because we dont know anything about it
+            # don't delete the cert because we don't know anything about it
             if repos is None or repos is []:
                 # FIXME: this can also mean we need to update the product cert
                 #        for prod_hash, since it is installed, but no longer maps to a repo
-                delete_product_cert = False
                 # no repos to check, go to next cert
+                log.debug('Skipping prod. cert.: %s without repos' % cert.path)
                 continue
 
+            delete_product_cert = True
             for repo in repos:
                 # if we had errors with the repo or productid metadata
                 # we could be very confused here, so do not
@@ -689,7 +694,12 @@ class ProductManager(object):
                 # If product id maps to a repo that we know is only temporarily
                 # disabled, don't delete it.
                 if repo in temp_disabled_repos:
-                    log.warn("%s is disabled via yum cmdline. Not deleting product cert %s", repo, prod_hash)
+                    log.warning("%s is disabled via yum cmdline. Not deleting product cert %s", repo, prod_hash)
+                    delete_product_cert = False
+
+                # If product id maps to a repo that we know is disabled, don't delete it.
+                if repo in disabled_repos:
+                    log.info("%s is disabled. Not deleting product cert %s", repo, prod_hash)
                     delete_product_cert = False
 
                 # is the repo we find here actually active? try harder to find active?
@@ -698,36 +708,46 @@ class ProductManager(object):
             # appears to be installed from the repo[s]
             #
             if delete_product_cert:
-                certs_to_delete.append((p, cert))
+                certs_to_delete.append((product, cert))
 
         # TODO: plugin hook for pre_product_id_delete
-        for (product, cert) in certs_to_delete:
-            log.info("None of the repos for %s are active: %s",
+        for product, cert in certs_to_delete:
+            log.debug("None of the repos for %s are active: %s",
                      product.id,
                      self.db.find_repos(product.id))
             log.info("product cert %s for %s is being deleted" % (product.id, product.id))
             cert.delete()
             self.pdir.refresh()
-            #TODO: plugin hook for post_product_id_delete
+            # TODO: plugin hook for post_product_id_delete
 
-            # it should be safe to delete it's entry now, we either dont
+            # it should be safe to delete it's entry now, we either don't
             # know anything about it's repos, it doesnt have any, or none
             # of the repos are active
             self.db.delete(product.id)
             self.db.write()
 
-    def _get_cert(self, fn):
-        if fn.endswith('.gz'):
-            f = GzipFile(fn)
+    def _get_cert(self, filename):
+        if filename.endswith('.gz'):
+            f = GzipFile(filename)
         else:
-            f = open(fn)
+            f = open(filename)
         try:
             pem = f.read()
-            return create_from_pem(pem)
+            if type(pem) == bytes:
+                pem = pem.decode('utf-8')
+            cert = create_from_pem(pem)
+            cert.pem = pem
+            return cert
         finally:
             f.close()
 
 
 if __name__ == '__main__':
+    from subscription_manager.injectioninit import init_dep_injection
+    init_dep_injection()
+
+    logging.basicConfig(filename='/var/log/rhsm/rhsm.log', level=logging.DEBUG)
+    log.debug('productid smoke testing')
+
     pm = ProductManager()
-    pm.update(yb=None)
+    pm.update_removed(active=set([]))

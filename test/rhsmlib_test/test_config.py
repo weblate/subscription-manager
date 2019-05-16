@@ -47,7 +47,8 @@ proxy_password =
 
 [rhsm]
 ca_cert_dir = /etc/rhsm/ca-test/
-baseurl= https://content.example.com
+baseurl = https://content.example.com
+repomd_gpg_url =
 repo_ca_cert = %(ca_cert_dir)sredhat-uep-non-default.pem
 productCertDir = /etc/pki/product
 entitlementCertDir = /etc/pki/entitlement
@@ -200,7 +201,7 @@ class TestConfigDBusObject(DBusObjectTest, TestUtilsMixin):
             result = args[0]
             self.assertIn("server", result)
 
-        dbus_method_args = []
+        dbus_method_args = ['']
         self.dbus_request(assertions, self.interface.GetAll, dbus_method_args)
 
     def test_get_property(self):
@@ -208,7 +209,7 @@ class TestConfigDBusObject(DBusObjectTest, TestUtilsMixin):
             result = args[0]
             self.assertIn('server.example.com', result)
 
-        dbus_method_args = ['server.hostname']
+        dbus_method_args = ['server.hostname', '']
         self.dbus_request(assertions, self.interface.Get, dbus_method_args)
 
     def test_get_section(self):
@@ -216,18 +217,18 @@ class TestConfigDBusObject(DBusObjectTest, TestUtilsMixin):
             result = args[0]
             self.assertIn('hostname', result)
 
-        dbus_method_args = ['server']
+        dbus_method_args = ['server', '']
         self.dbus_request(assertions, self.interface.Get, dbus_method_args)
 
     def test_set(self):
         def assertions(*args):
             self.assertEqual('new', self.parser.get('server', 'hostname'))
 
-        dbus_method_args = ['server.hostname', 'new']
+        dbus_method_args = ['server.hostname', 'new', '']
         self.dbus_request(assertions, self.interface.Set, dbus_method_args)
 
     def test_set_section_fails(self):
-        dbus_method_args = ['server', 'new']
+        dbus_method_args = ['server', 'new', '']
 
         with six.assertRaisesRegex(self, dbus.DBusException, r'Setting an entire section is not.*'):
             self.dbus_request(None, self.interface.Set, dbus_method_args)

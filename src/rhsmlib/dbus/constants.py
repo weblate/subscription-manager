@@ -12,8 +12,6 @@ from __future__ import print_function, division, absolute_import
 # Red Hat trademarks are not licensed under GPLv2. No permission is
 # granted to use or replicate Red Hat trademarks that are incorporated
 # in this software or its documentation.
-import string
-
 __all__ = [
     'NAME_BASE',
     'VERSION',
@@ -34,6 +32,11 @@ __all__ = [
     'PRODUCTS_DBUS_PATH',
     'ENTITLEMENT_INTERFACE',
     'ENTITLEMENT_DBUS_PATH',
+    'CONSUMER_INTERFACE',
+    'CONSUMER_DBUS_PATH',
+    'SYSPURPOSE_INTERFACE',
+    'SYSPURPOSE_DBUS_PATH',
+    'DBUS_PROPERTIES_INTERFACE',
 ]
 
 # The base of the 'well known name' used for bus and service names, as well
@@ -51,7 +54,7 @@ INTERFACE_BASE = BUS_NAME
 # Note: No trailing '/'
 #
 # /com/redhat/RHSM1
-ROOT_DBUS_PATH = '/' + string.replace(BUS_NAME, '.', '/')
+ROOT_DBUS_PATH = '/' + str.replace(BUS_NAME, '.', '/')
 
 MAIN_INTERFACE = INTERFACE_BASE
 MAIN_DBUS_PATH = ROOT_DBUS_PATH
@@ -76,3 +79,11 @@ PRODUCTS_DBUS_PATH = '%s/%s' % (ROOT_DBUS_PATH, 'Products')
 
 ENTITLEMENT_INTERFACE = '%s.%s' % (INTERFACE_BASE, 'Entitlement')
 ENTITLEMENT_DBUS_PATH = '%s/%s' % (ROOT_DBUS_PATH, 'Entitlement')
+
+CONSUMER_INTERFACE = '%s.%s' % (INTERFACE_BASE, 'Consumer')
+CONSUMER_DBUS_PATH = '%s/%s' % (ROOT_DBUS_PATH, 'Consumer')
+
+SYSPURPOSE_INTERFACE = '%s.%s' % (INTERFACE_BASE, 'Syspurpose')
+SYSPURPOSE_DBUS_PATH = '%s/%s' % (ROOT_DBUS_PATH, 'Syspurpose')
+
+DBUS_PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties'

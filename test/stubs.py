@@ -54,13 +54,14 @@ insecure = 1
 ssl_verify_depth = 3
 ca_cert_dir = /etc/rhsm/ca/
 proxy_hostname = notaproxy.grimlock.usersys.redhat.com
-proxy_port = 3128
+proxy_port = 4567
 proxy_user = proxy_user
 proxy_password = proxy_password
 no_proxy =
 
 [rhsm]
-baseurl= https://content.example.com
+baseurl = https://content.example.com
+repomd_gpg_url =
 repo_ca_cert = %(ca_cert_dir)sredhat-uep.pem
 productCertDir = /etc/pki/product
 entitlementCertDir = /etc/pki/entitlement
@@ -209,10 +210,12 @@ class StubProductCertificate(ProductCertificate):
         if not end_date:
             end_date = datetime.now() + timedelta(days=365)
 
+        path = "/path/to/fake_product.pem"
+
         super(StubProductCertificate, self).__init__(products=products,
                                                      serial=random.randint(1, 10000000),
                                                      start=start_date, end=end_date,
-                                                     version=version)
+                                                     version=version, path=path)
 
     def __str__(self):
         s = []
@@ -418,6 +421,7 @@ class StubUEP(object):
         self.called_unbind_pool_id = []
         self.username = username
         self.password = password
+        self._resources = []
         self._capabilities = []
 
     def reset(self):
@@ -430,7 +434,10 @@ class StubUEP(object):
         return capability in self._capabilities
 
     def supports_resource(self, resource):
-        return False
+        return resource in self._resources
+
+    def get_supported_resources(self):
+        return self._resources
 
     def registerConsumer(self, name, type, facts, owner, environment, keys,
                          installed_products, content_tags):
@@ -459,7 +466,7 @@ class StubUEP(object):
 
     def updateConsumer(self, consumer, facts=None, installed_products=None,
                        guest_uuids=None, service_level=None, release=None, autoheal=None,
-                       content_tags=None):
+                       content_tags=None, addons=None, role=None, usage=None):
         return consumer
 
     def setEnvironmentList(self, env_list):
@@ -492,6 +499,12 @@ class StubUEP(object):
 
     def getCompliance(self, uuid, on_data=None):
         return {}
+
+    def getSyspurposeCompliance(self, uuid, on_date=None):
+        return self.syspurpose_compliance_status
+
+    def setSyspurposeCompliance(self, status):
+        self.syspurpose_compliance_status = status
 
     def getEntitlementList(self, uuid):
         return [{'id': 'ent1'}, {'id': 'ent2'}]

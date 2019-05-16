@@ -37,6 +37,7 @@ PROFILE_MANAGER = "PROFILE_MANAGER"
 INSTALLED_PRODUCTS_MANAGER = "INSTALLED_PRODUCTS_MANAGER"
 RELEASE_STATUS_CACHE = "RELEASE_STATUS_CACHE"
 CONTENT_ACCESS_CACHE = "CONTENT_ACCESS_CACHE"
+SYSTEMPURPOSE_COMPLIANCE_STATUS_CACHE = "SYSTEMPURPOSE_COMPLIANCE_STATUS_CACHE"
 
 
 class FeatureBroker(object):
@@ -77,8 +78,7 @@ class FeatureBroker(object):
             raise KeyError("Unknown feature: %r" % feature)
 
         if isinstance(provider, (type, six.class_types)):
-            # Args should never be used with singletons, they are ignored
-            self.providers[feature] = provider()
+            self.providers[feature] = provider(*args, **kwargs)
         elif six.callable(provider):
             return provider(*args, **kwargs)
 

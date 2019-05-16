@@ -33,12 +33,17 @@ from rhsmlib.services import config
 # use instead of the normal pid file based ActionLock
 from threading import RLock
 
+if six.PY2:
+    OPEN_FUNCTION = '__builtin__.open'
+else:
+    OPEN_FUNCTION = 'builtins.open'
+
 
 @contextmanager
 def open_mock(content=None, **kwargs):
     content_out = six.StringIO()
     m = mock_open(read_data=content)
-    with patch('__builtin__.open', m, create=True, **kwargs) as mo:
+    with patch(OPEN_FUNCTION, m, create=True, **kwargs) as mo:
         stream = six.StringIO(content)
         rv = mo.return_value
         rv.write = lambda x: content_out.write(x)
@@ -52,7 +57,7 @@ def temp_file(content, *args, **kwargs):
     try:
         kwargs['delete'] = False
         kwargs.setdefault('prefix', 'sub-man-test')
-        fh = tempfile.NamedTemporaryFile(*args, **kwargs)
+        fh = tempfile.NamedTemporaryFile(mode='w+', *args, **kwargs)
         fh.write(content)
         fh.close()
         yield fh.name
@@ -168,7 +173,7 @@ class SubManFixture(unittest.TestCase):
         self.mock_calc.calculate.return_value = None
 
         # Avoid trying to read real /etc/yum.repos.d/redhat.repo
-        self.mock_repofile_path_exists_patcher = patch('subscription_manager.repolib.RepoFile.path_exists')
+        self.mock_repofile_path_exists_patcher = patch('subscription_manager.repolib.YumRepoFile.path_exists')
         mock_repofile_path_exists = self.mock_repofile_path_exists_patcher.start()
         mock_repofile_path_exists.return_value = True
 
@@ -233,6 +238,11 @@ class SubManFixture(unittest.TestCase):
         test_proxy_connection_mock = self.test_proxy_connection_patcher.start()
         test_proxy_connection_mock.return_value = True
 
+        self.syncedstore_patcher = patch('subscription_manager.syspurposelib.SyncedStore')
+        syncedstore_mock = self.syncedstore_patcher.start()
+
+        set_up_mock_sp_store(syncedstore_mock)
+
         self.files_to_cleanup = []
 
     def tearDown(self):
@@ -248,7 +258,7 @@ class SubManFixture(unittest.TestCase):
         Write out a tempfile and append it to the list of those to be
         cleaned up in tearDown.
         """
-        fid = tempfile.NamedTemporaryFile(mode='w+b', suffix='.tmp')
+        fid = tempfile.NamedTemporaryFile(mode='w+', suffix='.tmp')
         fid.write(contents)
         fid.seek(0)
         self.files_to_cleanup.append(fid)
@@ -265,7 +275,7 @@ class SubManFixture(unittest.TestCase):
 
     # The ContentConnection used for reading release versions from
     # the cdn. The injected one uses this.
-    def _get_release_versions(self, listing_path):
+    def _get_release_versions(self, listing_path, ent_cert_key_pairs):
         return self._release_versions
 
     # For changing injection consumer id to one that fails "is_valid"
@@ -352,7 +362,7 @@ class SubManFixture(unittest.TestCase):
 
     def assert_items_equals(self, a, b):
         """Assert that two lists contain the same items regardless of order."""
-        if sorted(a) != sorted(b):
+        if sorted(a, key=lambda item: str(item)) != sorted(b, key=lambda item: str(item)):
             self.fail("%s != %s" % (a, b))
         return True
 
@@ -399,3 +409,53 @@ class Capture(object):
     def __exit__(self, exc_type, exc_value, traceback):
         sys.stdout = self.stdout
         sys.stderr = self.stderr
+
+
+def set_up_mock_sp_store(mock_sp_store):
+    """
+    Sets up the mock syspurpose store with methods that are mock versions of the real deal.
+    Allows us to test in the absence of the syspurpose module.
+    This documents the essential expected behaviour of the methods subman relies upon
+    from the syspurpose codebase.
+    :return:
+    """
+    contents = {}
+    mock_sp_store_contents = contents
+
+    def set(item, value):
+        contents[item] = value
+
+    def read(path, raise_on_error=False):
+        return mock_sp_store
+
+    def unset(item):
+        contents[item] = None
+
+    def add(item, value):
+        current = contents.get(item, [])
+        if value not in current:
+            current.append(value)
+        contents[item] = current
+
+    def remove(item, value):
+        current = contents.get(item)
+        if current is not None and isinstance(current, list) and value in current:
+            current.remove(value)
+
+    def get_local_contents():
+        return contents
+
+    def update_local(data):
+        global contents
+        contents = data
+
+    mock_sp_store.return_value.set = Mock(side_effect=set)
+    mock_sp_store.return_value.read = Mock(side_effect=read)
+    mock_sp_store.return_value.unset = Mock(side_effect=unset)
+    mock_sp_store.return_value.add = Mock(side_effect=add)
+    mock_sp_store.return_value.remove = Mock(side_effect=remove)
+    mock_sp_store.return_value.local_contents = mock_sp_store_contents
+    mock_sp_store.return_value.get_local_contents = Mock(side_effect=get_local_contents)
+    mock_sp_store.return_value.update_local = Mock(side_effect=update_local)
+
+    return mock_sp_store, mock_sp_store_contents

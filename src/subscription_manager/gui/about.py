@@ -59,13 +59,11 @@ class AboutDialog(object):
 
         next_update_label = ga_Gtk.Label()
         next_auto_attach_label = ga_Gtk.Label()
-        python_rhsm_version_label = ga_Gtk.Label()
         sub_man_version_label = ga_Gtk.Label()
         backend_version_label = ga_Gtk.Label()
         context_box = self.dialog.vbox.get_children()[0]
         context_box.pack_end(next_auto_attach_label, True, True, 0)
         context_box.pack_end(next_update_label, True, True, 0)
-        context_box.pack_end(python_rhsm_version_label, True, True, 0)
         context_box.pack_end(sub_man_version_label, True, True, 0)
         context_box.pack_end(backend_version_label, True, True, 0)
 
@@ -75,8 +73,6 @@ class AboutDialog(object):
         server_versions = get_server_versions(self.backend.cp_provider.get_consumer_auth_cp())
         client_versions = get_client_versions()
 
-        python_rhsm_version_label.set_markup(_("<b>%s version:</b> %s") %
-                                        ("python-rhsm", client_versions['python-rhsm']))
         sub_man_version_label.set_markup(_("<b>%s version:</b> %s") %
                                         ("subscription manager", client_versions['subscription-manager']))
         backend_version_label.set_markup(_("<b>subscription management service version:</b> %s") %
@@ -95,8 +91,8 @@ class AboutDialog(object):
     def _set_next_update(self, next_update_label, next_auto_attach_label):
         try:
             if self._rhsmcertd_on():
-                next_update = int(file(CERT_CHECK_UPDATE_FILE).read())
-                next_auto_attach = int(file(AUTO_ATTACH_UPDATE_FILE).read())
+                next_update = int(open(CERT_CHECK_UPDATE_FILE, 'r').read())
+                next_auto_attach = int(open(AUTO_ATTACH_UPDATE_FILE, 'r').read())
             else:
                 next_update = None
                 next_auto_attach = None

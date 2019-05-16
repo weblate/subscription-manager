@@ -13,19 +13,21 @@
 #   just the fastest or easiest way.
 
 SHELL := /bin/bash
-PREFIX ?= /
+PYTHON ?= python
+DESTDIR ?= /
+PREFIX ?= /usr/local
 SYSCONF ?= etc
-INSTALL_DIR = usr/share
+INSTALL_DIR = $(PREFIX)/share
 
-OS = $(shell lsb_release -i | awk '{ print $$3 }' | awk -F. '{ print $$1}')
-OS_VERSION = $(shell lsb_release -r | awk '{ print $$2 }' | awk -F. '{ print $$1}')
+OS = $(shell test -f /etc/os-release && source /etc/os-release; echo $$ID)
 OS_DIST ?= $(shell rpm --eval='%dist')
 
-PYTHON_VER ?= $(shell python -c 'import sys; print("python%s.%s" % sys.version_info[:2])')
+PYTHON_VER ?= $(shell $(PYTHON) -c 'import sys; print("python%s.%s" % sys.version_info[:2])')
 
-PYTHON_SITELIB ?= usr/lib/$(PYTHON_VER)/site-packages
+PYTHON_SITELIB ?= $(PREFIX)/lib64/$(PYTHON_VER)/site-packages
+DNF_PLUGIN_PYTHON_SITELIB ?= $(PREFIX)/lib/$(PYTHON_VER)/site-packages
 # Note the underscore used instead of a hyphen
-PYTHON_INST_DIR = $(PREFIX)/$(PYTHON_SITELIB)/subscription_manager
+PYTHON_INST_DIR = $(PYTHON_SITELIB)/subscription_manager
 
 # Where various bits of code live in the git repo
 SRC_DIR := src/subscription_manager
@@ -38,36 +40,40 @@ ANACONDA_ADDON_NAME = com_redhat_subscription_manager
 ANACONDA_ADDON_MODULE_SRC_DIR := src/initial-setup/$(ANACONDA_ADDON_NAME)
 
 # dirs we install to
-SYSTEMD_INST_DIR := $(PREFIX)/usr/lib/systemd/system
-RHSM_PLUGIN_DIR := $(PREFIX)/usr/share/rhsm-plugins/
-RHSM_PLUGIN_CONF_DIR := $(PREFIX)/etc/rhsm/pluginconf.d/
-ANACONDA_ADDON_INST_DIR := $(PREFIX)/usr/share/anaconda/addons
+SYSTEMD_INST_DIR := $(PREFIX)/lib/systemd/system
+RHSM_PLUGIN_DIR := $(PREFIX)/share/rhsm-plugins/
+RHSM_PLUGIN_CONF_DIR := /etc/rhsm/pluginconf.d/
+ANACONDA_ADDON_INST_DIR := $(PREFIX)/share/anaconda/addons
 INITIAL_SETUP_INST_DIR := $(ANACONDA_ADDON_INST_DIR)/$(ANACONDA_ADDON_NAME)
-POLKIT_ACTIONS_INST_DIR := $(PREFIX)/$(INSTALL_DIR)/polkit-1/actions
+POLKIT_ACTIONS_INST_DIR := $(INSTALL_DIR)/polkit-1/actions
+COMPLETION_DIR ?= $(INSTALL_DIR)/bash-completion/completions/
 LIBEXEC_DIR ?= $(shell rpm --eval='%_libexecdir')
+SUBPACKAGES ?= $(shell ls -d syspurpose)
 
 # If we skip install ostree plugin, unset by default
 # override from spec file for rhel6
 INSTALL_OSTREE_PLUGIN ?= true
 
 WITH_SYSTEMD ?= true
+WITH_SUBMAN_GUI ?= true
+WITH_COCKPIT ?= true
 
-# Default differences between el6 and el7
-ifeq ($(OS_DIST),.el6)
+# if OS is empty string, we're on el6 or sles11
+ifeq ($(OS),)
    GTK_VERSION?=2
-   FIRSTBOOT_MODULES_DIR?=$(PREFIX)/usr/share/rhn/up2date_client/firstboot
-   INSTALL_FIRSTBOOT?=true
-   INSTALL_INITIAL_SETUP?=false
-else ifeq ($(findstring SUSE,$(OS)),SUSE)
-   GTK_VERSION?=2
-   FIRSTBOOT_MODULES_DIR?=$(PREFIX)/usr/share/rhn/up2date_client/firstboot
    INSTALL_FIRSTBOOT?=true
    INSTALL_INITIAL_SETUP?=false
 else
    GTK_VERSION?=3
-   FIRSTBOOT_MODULES_DIR?=$(PREFIX)/usr/share/firstboot/modules
    INSTALL_FIRSTBOOT?=true
    INSTALL_INITIAL_SETUP?=true
+endif
+
+# /usr/share/rhn location for el6, suse
+ifeq ($(filter-out sles opensuse,$(OS)),)
+   FIRSTBOOT_MODULES_DIR?=$(PREFIX)/share/rhn/up2date_client/firstboot
+else
+   FIRSTBOOT_MODULES_DIR?=$(PREFIX)/share/firstboot/modules
 endif
 
 # always true until fedora is just dnf
@@ -79,6 +85,7 @@ INSTALL_DNF_PLUGINS ?= false
 DNF_PLUGINS_SRC_DIR := src/plugins
 
 INSTALL_ZYPPER_PLUGINS ?= false
+INCLUDE_SYSPURPOSE ?= 0
 
 # sets a version that is more or less latest tag plus commit sha
 VERSION ?= $(shell git describe | awk ' { sub(/subscription-manager-/,"")};1' )
@@ -93,19 +100,29 @@ ICON_CFLAGS=`pkg-config --cflags "gtk+-$(GTK_VERSION).0 libnotify gconf-2.0 dbus
 ICON_LDFLAGS=`pkg-config --libs "gtk+-$(GTK_VERSION).0 libnotify gconf-2.0 dbus-glib-1"`
 
 PYFILES := `find src/ test/ -name "*.py"`
-BIN_FILES := bin/subscription-manager bin/subscription-manager-gui \
+BIN_FILES := bin/subscription-manager \
 			 bin/rhn-migrate-classic-to-rhsm \
 			 bin/rct \
 			 bin/rhsm-debug
+
 STYLEFILES=$(PYFILES) $(BIN_FILES)
 
 .DEFAULT_GOAL := build
 
-build: rhsmcertd rhsm-icon
+build-subpackages:
+	for subpackage in $(SUBPACKAGES); \
+	do \
+	    pushd $$subpackage; \
+	    $(PYTHON) ./setup.py clean --all \
+	    $(PYTHON) ./setup.py build --root=$(DESTDIR) --prefix=$(PREFIX); \
+	    popd; \
+	done;
+
+build: rhsmcertd rhsm-icon build-subpackages
 # Install doesn't perform a build if it doesn't have too.  Best to clean out
 # any cruft so developers don't end up install old builds.
-	./setup.py clean --all
-	./setup.py build --quiet --gtk-version=$(GTK_VERSION) --rpm-version=$(VERSION)
+	$(PYTHON) ./setup.py clean --all
+	$(PYTHON) ./setup.py build --quiet --gtk-version=$(GTK_VERSION) --rpm-version=$(VERSION)
 
 # we never "remake" this makefile, so add a target so
 # we stop searching for implicit rules on how to remake it
@@ -116,12 +133,17 @@ clean:
 	rm -f *.pyc *.pyo *~ *.bak *.tar.gz
 	rm -f bin/rhsmcertd
 	rm -f bin/rhsm-icon
-	./setup.py clean --all
+	$(PYTHON) ./setup.py clean --all
+	rm -rf cover/ htmlcov/ docs/sphinx/_build/ build/ dist/
 
-rhsmcertd: $(DAEMONS_SRC_DIR)/rhsmcertd.c
+.PHONY: mkdir-bin
+mkdir-bin:
+	mkdir -p bin
+
+rhsmcertd: mkdir-bin $(DAEMONS_SRC_DIR)/rhsmcertd.c
 	$(CC) $(CFLAGS) $(RHSMCERTD_CFLAGS) -DLIBEXECDIR='"$(LIBEXEC_DIR)"' $(DAEMONS_SRC_DIR)/rhsmcertd.c -o bin/rhsmcertd $(LDFLAGS) $(RHSMCERTD_LDFLAGS)
 
-rhsm-icon: $(RHSM_ICON_SRC_DIR)/rhsm_icon.c
+rhsm-icon: mkdir-bin $(RHSM_ICON_SRC_DIR)/rhsm_icon.c
 	$(CC) $(CFLAGS) $(ICON_CFLAGS) $(RHSM_ICON_SRC_DIR)/rhsm_icon.c -o bin/rhsm-icon $(LDFLAGS) $(ICON_LDFLAGS)
 
 .PHONY: check-syntax
@@ -129,76 +151,83 @@ check-syntax:
 	$(CC) -fsyntax-only $(CFLAGS) $(LDFLAGS) $(ICON_FLAGS) `find -name '*.c'`
 
 dbus-common-install:
-	install -d $(PREFIX)/etc/dbus-1/system.d
-	install -d $(PREFIX)/$(INSTALL_DIR)/dbus-1/system-services
-	install -d $(PREFIX)/$(LIBEXEC_DIR)
-	install -d $(PREFIX)/etc/bash_completion.d
+	install -d $(DESTDIR)/etc/dbus-1/system.d
+	install -d $(DESTDIR)/$(INSTALL_DIR)/dbus-1/system-services
+	install -d $(DESTDIR)/$(LIBEXEC_DIR)
+	install -d $(DESTDIR)/$(COMPLETION_DIR)
 
 dbus-rhsmd-service-install: dbus-common-install
-	install -m 644 etc-conf/dbus/system.d/com.redhat.SubscriptionManager.conf $(PREFIX)/etc/dbus-1/system.d
-	install -m 744 $(DAEMONS_SRC_DIR)/rhsm_d.py $(PREFIX)/$(LIBEXEC_DIR)/rhsmd
+	install -m 644 etc-conf/dbus/system.d/com.redhat.SubscriptionManager.conf $(DESTDIR)/etc/dbus-1/system.d
 
 dbus-facts-service-install: dbus-common-install
-	install -m 644 etc-conf/dbus/system.d/com.redhat.RHSM1.Facts.conf $(PREFIX)/etc/dbus-1/system.d
+	install -m 644 etc-conf/dbus/system.d/com.redhat.RHSM1.Facts.conf $(DESTDIR)/etc/dbus-1/system.d
 
 dbus-main-service-install: dbus-common-install
-	install -m 644 etc-conf/dbus/system.d/com.redhat.RHSM1.conf $(PREFIX)/etc/dbus-1/system.d
+	install -m 644 etc-conf/dbus/system.d/com.redhat.RHSM1.conf $(DESTDIR)/etc/dbus-1/system.d
 
 .PHONY: dbus-install
 dbus-install: dbus-facts-service-install dbus-rhsmd-service-install dbus-main-service-install
 
 .PHONY: install-conf
 install-conf:
-	install -d $(PREFIX)/etc/{cron.daily,logrotate.d,pam.d,bash_completion.d,rhsm}
-	install -d $(PREFIX)/etc/rc.d/init.d
-	install -d $(PREFIX)/etc/init.d
-	install -d $(PREFIX)/etc/rhsm/facts
-	install -d $(PREFIX)/etc/security/console.apps
-	install -m 644 etc-conf/rhsm.conf $(PREFIX)/etc/rhsm/
-	install -T etc-conf/logging.conf $(PREFIX)/etc/rhsm/logging.conf
-	install -m 644 etc-conf/logrotate.conf $(PREFIX)/etc/logrotate.d/subscription-manager
-	install -m 644 etc-conf/subscription-manager.completion.sh $(PREFIX)/etc/bash_completion.d/subscription-manager
-	install -m 644 etc-conf/rct.completion.sh $(PREFIX)/etc/bash_completion.d/rct
-	install -m 644 etc-conf/rhsm-debug.completion.sh $(PREFIX)/etc/bash_completion.d/rhsm-debug
-	install -m 644 etc-conf/rhn-migrate-classic-to-rhsm.completion.sh $(PREFIX)/etc/bash_completion.d/rhn-migrate-classic-to-rhsm
-	install -m 644 etc-conf/subscription-manager-gui.completion.sh $(PREFIX)/etc/bash_completion.d/subscription-manager-gui
-	install -m 644 etc-conf/rhsm-icon.completion.sh $(PREFIX)/etc/bash_completion.d/rhsm-icon
-	install -m 644 etc-conf/rhsmcertd.completion.sh $(PREFIX)/etc/bash_completion.d/rhsmcertd
-	install -d $(PREFIX)/usr/share/appdata
-	install -m 644 etc-conf/subscription-manager-gui.appdata.xml $(PREFIX)/$(INSTALL_DIR)/appdata/subscription-manager-gui.appdata.xml
-	install -d $(POLKIT_ACTIONS_INST_DIR)
-	install -m 644 etc-conf/dbus/polkit/com.redhat.RHSM1.policy $(POLKIT_ACTIONS_INST_DIR)
-	install -m 644 etc-conf/dbus/polkit/com.redhat.RHSM1.Facts.policy $(POLKIT_ACTIONS_INST_DIR)
-	install -m 644 etc-conf/dbus/polkit/com.redhat.SubscriptionManager.policy $(POLKIT_ACTIONS_INST_DIR)
+	install -d $(DESTDIR)/etc/{cron.daily,logrotate.d,pam.d,rhsm}
+	install -d $(DESTDIR)/$(COMPLETION_DIR)
+	install -d $(DESTDIR)/etc/rc.d/init.d
+	install -d $(DESTDIR)/etc/init.d
+	install -d $(DESTDIR)/etc/rhsm/{facts,syspurpose}
+	install -d $(DESTDIR)/etc/security/console.apps
+	install -m 644 etc-conf/rhsm.conf $(DESTDIR)/etc/rhsm/
+	install -T etc-conf/logging.conf $(DESTDIR)/etc/rhsm/logging.conf
+	install -m 644 etc-conf/logrotate.conf $(DESTDIR)/etc/logrotate.d/subscription-manager
+	install -m 644 etc-conf/subscription-manager.completion.sh $(DESTDIR)/$(COMPLETION_DIR)/subscription-manager
+	install -m 644 etc-conf/rct.completion.sh $(DESTDIR)/$(COMPLETION_DIR)/rct
+	install -m 644 etc-conf/rhsm-debug.completion.sh $(DESTDIR)/$(COMPLETION_DIR)/rhsm-debug
+	install -m 644 etc-conf/rhn-migrate-classic-to-rhsm.completion.sh $(DESTDIR)/$(COMPLETION_DIR)/rhn-migrate-classic-to-rhsm
+	install -m 644 etc-conf/rhsmcertd.completion.sh $(DESTDIR)/$(COMPLETION_DIR)/rhsmcertd
+	install -d $(DESTDIR)/$(PREFIX)/share/appdata
+	install -d $(DESTDIR)/$(POLKIT_ACTIONS_INST_DIR)
+	install -m 644 etc-conf/dbus/polkit/com.redhat.RHSM1.policy $(DESTDIR)/$(POLKIT_ACTIONS_INST_DIR)
+	install -m 644 etc-conf/dbus/polkit/com.redhat.RHSM1.Facts.policy $(DESTDIR)/$(POLKIT_ACTIONS_INST_DIR)
+	install -m 644 etc-conf/dbus/polkit/com.redhat.SubscriptionManager.policy $(DESTDIR)/$(POLKIT_ACTIONS_INST_DIR)
+	if [[ "$(INCLUDE_SYSPURPOSE)" = "1" ]]; then \
+		install -m 644 etc-conf/syspurpose/valid_fields.json $(DESTDIR)/etc/rhsm/syspurpose/valid_fields.json; \
+		install -m 644 etc-conf/syspurpose.completion.sh $(DESTDIR)/$(COMPLETION_DIR)/syspurpose; \
+	fi;
+	if [[ "$(WITH_SUBMAN_GUI)" == "true" ]]; then \
+		install -m 644 etc-conf/subscription-manager-gui.appdata.xml $(DESTDIR)/$(INSTALL_DIR)/appdata/subscription-manager-gui.appdata.xml; \
+		install -m 644 etc-conf/subscription-manager-gui.completion.sh $(DESTDIR)/$(COMPLETION_DIR)/subscription-manager-gui; \
+		install -m 644 etc-conf/rhsm-icon.completion.sh $(DESTDIR)/$(COMPLETION_DIR)/rhsm-icon; \
+	fi;
 
 .PHONY: install-plugins
 install-plugins:
-	install -d $(RHSM_PLUGIN_DIR)
-	install -d $(RHSM_PLUGIN_CONF_DIR)
-	install -d $(PREFIX)/etc/rhsm/ca
-	install -m 644 -p etc-conf/redhat-entitlement-authority.pem $(PREFIX)/etc/rhsm/ca/redhat-entitlement-authority.pem
+	install -d $(DESTDIR)/$(RHSM_PLUGIN_DIR)
+	install -d $(DESTDIR)/$(RHSM_PLUGIN_CONF_DIR)
+	install -d $(DESTDIR)/etc/rhsm/ca
+	install -m 644 -p etc-conf/redhat-entitlement-authority.pem $(DESTDIR)/etc/rhsm/ca/redhat-entitlement-authority.pem
 
 	if [ "$(INSTALL_YUM_PLUGINS)" = "true" ] ; then \
 		echo "Installing Yum plugins" ; \
-		install -d $(PREFIX)/etc/yum/pluginconf.d/ ; \
-		install -d $(PREFIX)/usr/lib/yum-plugins/ ; \
-		install -m 644 -p src/plugins/*.py $(PREFIX)/usr/lib/yum-plugins/ ; \
-		install -m 644 etc-conf/plugin/*.conf $(PREFIX)/etc/yum/pluginconf.d/ ; \
+		install -d $(DESTDIR)/etc/yum/pluginconf.d/ ; \
+		install -d $(DESTDIR)/$(PREFIX)/lib/yum-plugins/ ; \
+		install -m 644 -p src/plugins/*.py $(DESTDIR)/$(PREFIX)/lib/yum-plugins/ ; \
+		install -m 644 etc-conf/plugin/*.conf $(DESTDIR)/etc/yum/pluginconf.d/ ; \
 	fi;
 
 	if [ "$(INSTALL_ZYPPER_PLUGINS)" = "true" ] ; then \
 	  echo "Installing zypper plugins" ; \
-		install -d $(PREFIX)/etc/rhsm/zypper.repos.d ; \
-		install -d $(PREFIX)/usr/lib/zypp/plugins/services ; \
-		install -d $(PREFIX)/usr/lib/zypp/plugins/commit ; \
-		install -m 755 -p src/zypper/services/* $(PREFIX)/usr/lib/zypp/plugins/services ; \
-		install -m 755 -p src/zypper/commit/* $(PREFIX)/usr/lib/zypp/plugins/commit ; \
+		install -d $(DESTDIR)/etc/rhsm/zypper.repos.d ; \
+		install -d $(DESTDIR)/$(PREFIX)/lib/zypp/plugins/services ; \
+		install -m 755 -p src/zypper/services/* $(DESTDIR)/$(PREFIX)/lib/zypp/plugins/services ; \
 	fi;
 
 	if [ "$(INSTALL_DNF_PLUGINS)" = "true" ] ; then \
 		echo "Installing DNF plugins" ; \
-		install -d $(PREFIX)/$(PYTHON_SITELIB)/dnf-plugins/ ; \
-		install -m 644 -p src/dnf-plugins/*.py $(PREFIX)/$(PYTHON_SITELIB)/dnf-plugins/ ; \
+		install -d $(DESTDIR)/$(DNF_PLUGIN_PYTHON_SITELIB)/dnf-plugins/ ; \
+		install -d $(DESTDIR)/etc/dnf/plugins/ ; \
+		install -m 644 -p src/dnf-plugins/*.py $(DESTDIR)/$(DNF_PLUGIN_PYTHON_SITELIB)/dnf-plugins/ ; \
+		install -m 644 etc-conf/plugin/product-id.conf $(DESTDIR)/etc/dnf/plugins/ ; \
+		install -m 644 etc-conf/plugin/subscription-manager.conf $(DESTDIR)/etc/dnf/plugins/ ; \
 	fi;
 
 	# ostree stuff
@@ -206,43 +235,43 @@ install-plugins:
 		echo "Installing ostree plugins" ; \
 		install -m 644 -p \
 		$(CONTENT_PLUGINS_SRC_DIR)/ostree_content.OstreeContentPlugin.conf \
-		$(RHSM_PLUGIN_CONF_DIR) ; \
-		install -d $(PYTHON_INST_DIR)/plugin/ostree ; \
-		install -m 644 -p $(SRC_DIR)/plugin/ostree/*.py $(PYTHON_INST_DIR)/plugin/ostree ; \
+		$(DESTDIR)/$(RHSM_PLUGIN_CONF_DIR) ; \
+		install -d $(DESTDIR)/$(PYTHON_INST_DIR)/plugin/ostree ; \
+		install -m 644 -p $(SRC_DIR)/plugin/ostree/*.py $(DESTDIR)/$(PYTHON_INST_DIR)/plugin/ostree ; \
 	fi;
 
 	# container stuff
 	install -m 644 -p \
 		$(CONTENT_PLUGINS_SRC_DIR)/container_content.ContainerContentPlugin.conf \
-		$(RHSM_PLUGIN_CONF_DIR)
-	install -m 644 $(CONTENT_PLUGINS_SRC_DIR)/container_content.py $(RHSM_PLUGIN_DIR)
+		$(DESTDIR)/$(RHSM_PLUGIN_CONF_DIR)
+	install -m 644 $(CONTENT_PLUGINS_SRC_DIR)/container_content.py $(DESTDIR)/$(RHSM_PLUGIN_DIR)
 
 .PHONY: install-ga
 ifeq ($(GTK_VERSION),2)
 install-ga:
 	$(info Using GTK $(GTK_VERSION))
-	install -d $(PYTHON_INST_DIR)/ga_impls/ga_gtk2
-	install -m 644 -p $(SRC_DIR)/ga_impls/__init__.py* $(PYTHON_INST_DIR)/ga_impls
-	install -m 644 -p $(SRC_DIR)/ga_impls/ga_gtk2/*.py $(PYTHON_INST_DIR)/ga_impls/ga_gtk2
+	install -d $(DESTDIR)/$(PYTHON_INST_DIR)/ga_impls/ga_gtk2
+	install -m 644 -p $(SRC_DIR)/ga_impls/__init__.py* $(DESTDIR)/$(PYTHON_INST_DIR)/ga_impls
+	install -m 644 -p $(SRC_DIR)/ga_impls/ga_gtk2/*.py $(DESTDIR)/$(PYTHON_INST_DIR)/ga_impls/ga_gtk2
 else
 install-ga:
 	$(info Using GTK $(GTK_VERSION))
-	install -d $(PYTHON_INST_DIR)/ga_impls
-	install -m 644 -p $(SRC_DIR)/ga_impls/__init__.py* $(PYTHON_INST_DIR)/ga_impls
-	install -m 644 -p $(SRC_DIR)/ga_impls/ga_gtk3.py* $(PYTHON_INST_DIR)/ga_impls
+	install -d $(DESTDIR)/$(PYTHON_INST_DIR)/ga_impls
+	install -m 644 -p $(SRC_DIR)/ga_impls/__init__.py* $(DESTDIR)/$(PYTHON_INST_DIR)/ga_impls
+	install -m 644 -p $(SRC_DIR)/ga_impls/ga_gtk3.py* $(DESTDIR)/$(PYTHON_INST_DIR)/ga_impls
 endif
 
 .PHONY: install-example-plugins
 install-example-plugins: install-plugins
-	install -m 644 -p example-plugins/*.py $(RHSM_PLUGIN_DIR)
-	install -m 644 -p example-plugins/*.conf $(RHSM_PLUGIN_CONF_DIR)
+	install -m 644 -p example-plugins/*.py $(DESTDIR)/$(RHSM_PLUGIN_DIR)
+	install -m 644 -p example-plugins/*.conf $(DESTDIR)/$(RHSM_PLUGIN_CONF_DIR)
 
 .PHONY: install-firstboot
 ifeq ($(INSTALL_FIRSTBOOT),true)
 install-firstboot:
 	$(info Installing firstboot to $(FIRSTBOOT_MODULES_DIR))
-	install -d $(FIRSTBOOT_MODULES_DIR)
-	install -m 644 $(SRC_DIR)/gui/firstboot/*.py* $(FIRSTBOOT_MODULES_DIR)
+	install -d $(DESTDIR)/$(FIRSTBOOT_MODULES_DIR)
+	install -m 644 $(SRC_DIR)/gui/firstboot/*.py* $(DESTDIR)/$(FIRSTBOOT_MODULES_DIR)
 else
 install-firstboot:
 	# Override INSTALL_FIRSTBOOT variable on command line if needed
@@ -254,15 +283,15 @@ endif
 ifeq ($(INSTALL_INITIAL_SETUP),true)
 install-initial-setup:
 	$(info Installing initial-setup to $(INITIAL_SETUP_INST_DIR))
-	install -m 644 $(CONTENT_PLUGINS_SRC_DIR)/ostree_content.py $(RHSM_PLUGIN_DIR)
-	install -d $(ANACONDA_ADDON_INST_DIR)
-	install -d $(INITIAL_SETUP_INST_DIR)/gui/spokes
-	install -d $(INITIAL_SETUP_INST_DIR)/{categories,ks}
-	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/*.py $(INITIAL_SETUP_INST_DIR)/
-	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/gui/*.py $(INITIAL_SETUP_INST_DIR)/gui/
-	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/categories/*.py $(INITIAL_SETUP_INST_DIR)/categories/
-	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/gui/spokes/{*.py,*.ui} $(INITIAL_SETUP_INST_DIR)/gui/spokes/
-	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/ks/*.py $(INITIAL_SETUP_INST_DIR)/ks/
+	install -m 644 $(CONTENT_PLUGINS_SRC_DIR)/ostree_content.py $(DESTDIR)/$(RHSM_PLUGIN_DIR)
+	install -d $(DESTDIR)/$(ANACONDA_ADDON_INST_DIR)
+	install -d $(DESTDIR)/$(INITIAL_SETUP_INST_DIR)/gui/spokes
+	install -d $(DESTDIR)/$(INITIAL_SETUP_INST_DIR)/{categories,ks}
+	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/*.py $(DESTDIR)/$(INITIAL_SETUP_INST_DIR)/
+	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/gui/*.py $(DESTDIR)/$(INITIAL_SETUP_INST_DIR)/gui/
+	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/categories/*.py $(DESTDIR)/$(INITIAL_SETUP_INST_DIR)/categories/
+	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/gui/spokes/{*.py,*.ui} $(DESTDIR)/$(INITIAL_SETUP_INST_DIR)/gui/spokes/
+	install -m 644 -p $(ANACONDA_ADDON_MODULE_SRC_DIR)/ks/*.py $(DESTDIR)/$(INITIAL_SETUP_INST_DIR)/ks/
 else
 install-initial-setup:
 	# Set INSTALL_INITIAL_SETUP variable on command line if needed.
@@ -273,99 +302,131 @@ endif
 install-post-boot: install-firstboot install-initial-setup
 
 .PHONY: install-via-setup
-install-via-setup:
-	./setup.py install --root $(PREFIX) --gtk-version=$(GTK_VERSION) --rpm-version=$(VERSION) --with-systemd=$(WITH_SYSTEMD) --prefix=/usr
+install-via-setup: install-subpackages-via-setup
+	$(PYTHON) ./setup.py install --root $(DESTDIR) --gtk-version=$(GTK_VERSION) --rpm-version=$(VERSION) --prefix=$(PREFIX) \
+	--with-systemd=$(WITH_SYSTEMD) --with-subman-gui=${WITH_SUBMAN_GUI} --with-cockpit-desktop-entry=${WITH_COCKPIT} \
+	$(SETUP_PY_INSTALL_PARAMS)
+	mkdir -p $(DESTDIR)/$(PREFIX)/sbin/
+	mkdir -p $(DESTDIR)/$(LIBEXEC_DIR)/
+	mv $(DESTDIR)/$(PREFIX)/bin/subscription-manager $(DESTDIR)/$(PREFIX)/sbin/
+	mv $(DESTDIR)/$(PREFIX)/bin/rhn-migrate-classic-to-rhsm $(DESTDIR)/$(PREFIX)/sbin/
+	mv $(DESTDIR)/$(PREFIX)/bin/rhsmcertd-worker $(DESTDIR)/$(LIBEXEC_DIR)/
+	mv $(DESTDIR)/$(PREFIX)/bin/rhsm-service $(DESTDIR)/$(LIBEXEC_DIR)/
+	mv $(DESTDIR)/$(PREFIX)/bin/rhsm-facts-service $(DESTDIR)/$(LIBEXEC_DIR)/
+	mv $(DESTDIR)/$(PREFIX)/bin/rhsmd $(DESTDIR)/$(LIBEXEC_DIR)/
+	if [[ "$(WITH_SUBMAN_GUI)" == "true" ]]; then \
+		mv $(DESTDIR)/$(PREFIX)/bin/subscription-manager-gui $(DESTDIR)/$(PREFIX)/sbin/; \
+	else \
+		rm $(DESTDIR)/$(PREFIX)/bin/subscription-manager-gui; \
+	fi; \
+	if [[ "$(INCLUDE_SYSPURPOSE)" = "1" ]]; then \
+		mv $(DESTDIR)/$(PREFIX)/bin/syspurpose $(DESTDIR)/$(PREFIX)/sbin/; \
+	fi;
+	find $(DESTDIR)/$(PYTHON_SITELIB) -name requires.txt -exec sed -i '/dbus-python/d' {} \;
+
+
+.PHONY: install-subpackages-via-setup
+install-subpackages-via-setup:
+	for subpackage in $(SUBPACKAGES); \
+	do \
+	    pushd $$subpackage; \
+	    $(PYTHON) ./setup.py install --root=$(DESTDIR) --prefix=$(PREFIX); \
+		popd; \
+	done;
 
 .PHONY: install
 install: install-via-setup install-files
 
+
 .PHONY: install-files
 install-files: dbus-install install-conf install-plugins install-post-boot install-ga
-	install -d $(PREFIX)/var/log/rhsm
-	install -d $(PREFIX)/var/spool/rhsm/debug
-	install -d $(PREFIX)/var/run/rhsm
-	install -d -m 750 $(PREFIX)/var/lib/rhsm/{cache,facts,packages,repo_server_val}
+	install -d $(DESTDIR)/var/log/rhsm
+	install -d $(DESTDIR)/var/spool/rhsm/debug
+	install -d $(DESTDIR)/var/run/rhsm
+	install -d -m 750 $(DESTDIR)/var/lib/rhsm/{cache,facts,packages,repo_server_val}
 
-	# Set up rhsmcertd daemon. If installing on Fedora or RHEL 7+
-	# we prefer systemd over sysv as this is the new trend.
-	if [ $(OS) = Fedora ] ; then \
-		install -d $(PREFIX)/usr/lib/tmpfiles.d; \
-		install etc-conf/rhsmcertd.service $(SYSTEMD_INST_DIR); \
+	# Set up rhsmcertd daemon. Installation location depends on distro...
+	# if WITH_SYSTEMD == true: sles12, opensuse42, el7+, or fedora
+	# otherwise, if /etc/redhat-release exists: el6
+	# otherwise, if SuSE-release says 11, sles11
+	if [ "$(WITH_SYSTEMD)" == "true" ]; then \
+		install -d $(DESTDIR)/$(SYSTEMD_INST_DIR); \
+		install -d $(DESTDIR)/$(PREFIX)/lib/tmpfiles.d; \
+		install etc-conf/rhsmcertd.service $(DESTDIR)/$(SYSTEMD_INST_DIR); \
 		install etc-conf/subscription-manager.conf.tmpfiles \
-			$(PREFIX)/usr/lib/tmpfiles.d/subscription-manager.conf; \
-	elif [[ $(OS) == *"SUSE" ]]; then \
-		if [ $(OS_VERSION) -lt 1315 ]; then \
-			install etc-conf/rhsmcertd.init.d \
-				$(PREFIX)/etc/init.d/rhsmcertd; \
-		else \
-			install -d $(SYSTEMD_INST_DIR); \
-			install -d $(PREFIX)/usr/lib/tmpfiles.d; \
-			install etc-conf/rhsmcertd.service $(SYSTEMD_INST_DIR); \
-			install etc-conf/subscription-manager.conf.tmpfiles \
-			$(PREFIX)/usr/lib/tmpfiles.d/subscription-manager.conf; \
-		fi; \
-	else \
-		if [ $(OS_VERSION) -lt 7 ]; then \
-			install etc-conf/rhsmcertd.init.d \
-				$(PREFIX)/etc/rc.d/init.d/rhsmcertd; \
-		else \
-			install -d $(PREFIX)/usr/lib/tmpfiles.d; \
-			install etc-conf/rhsmcertd.service $(SYSTEMD_INST_DIR); \
-			install etc-conf/subscription-manager.conf.tmpfiles \
-				$(PREFIX)/usr/lib/tmpfiles.d/subscription-manager.conf; \
-		fi; \
-	fi; \
+			$(DESTDIR)/$(PREFIX)/lib/tmpfiles.d/subscription-manager.conf; \
+	elif [ -f /etc/redhat-release ]; then \
+		install etc-conf/rhsmcertd.init.d \
+			$(DESTDIR)/etc/rc.d/init.d/rhsmcertd; \
+	elif [ "$(shell cat /etc/SuSE-release | grep VERSION | awk '{ print $$3 }')" == "11" ]; then \
+		install etc-conf/rhsmcertd.init.d \
+			$(DESTDIR)/etc/init.d/rhsmcertd; \
+	fi;
 
-	install -m 700 etc-conf/rhsmd.cron $(PREFIX)/etc/cron.daily/rhsmd
+	install -m 700 etc-conf/rhsmd.cron $(DESTDIR)/etc/cron.daily/rhsmd
 
 	# SUSE Linux does not make use of consolehelper
-	if [[ ! $(OS) == *"SUSE" ]]; then \
-		ln -sf /usr/bin/consolehelper $(PREFIX)/usr/bin/subscription-manager-gui; \
-		ln -sf /usr/bin/consolehelper $(PREFIX)/usr/bin/subscription-manager; \
-		\
-		install -m 644 etc-conf/subscription-manager-gui.pam $(PREFIX)/etc/pam.d/subscription-manager-gui; \
-		install -m 644 etc-conf/subscription-manager.pam $(PREFIX)/etc/pam.d/subscription-manager; \
-		\
-		install -m 644 etc-conf/subscription-manager-gui.console $(PREFIX)/etc/security/console.apps/subscription-manager-gui; \
-		install -m 644 etc-conf/subscription-manager.console $(PREFIX)/etc/security/console.apps/subscription-manager; \
+	if [ -f /etc/redhat-release ]; then \
+		ln -sf /usr/bin/consolehelper $(DESTDIR)/$(PREFIX)/bin/subscription-manager; \
+		install -m 644 etc-conf/subscription-manager.pam $(DESTDIR)/etc/pam.d/subscription-manager; \
+		install -m 644 etc-conf/subscription-manager.console $(DESTDIR)/etc/security/console.apps/subscription-manager; \
+		if [[ "$(WITH_SUBMAN_GUI)" == "true" ]]; then \
+			ln -sf /usr/bin/consolehelper $(DESTDIR)/$(PREFIX)/bin/subscription-manager-gui; \
+			install -m 644 etc-conf/subscription-manager-gui.pam $(DESTDIR)/etc/pam.d/subscription-manager-gui; \
+			install -m 644 etc-conf/subscription-manager-gui.console $(DESTDIR)/etc/security/console.apps/subscription-manager-gui; \
+		fi; \
 	fi; \
 
-	install -m 755 bin/rhsm-icon $(PREFIX)/usr/bin/rhsm-icon
-	install -m 755 bin/rhsmcertd $(PREFIX)/usr/bin/rhsmcertd
+	if [[ "$(WITH_SUBMAN_GUI)" == "true" ]]; then \
+		install -m 755 bin/rhsm-icon $(DESTDIR)/$(PREFIX)/bin/rhsm-icon; \
+	fi; \
+
+	install -m 755 bin/rhsmcertd $(DESTDIR)/$(PREFIX)/bin/rhsmcertd
 
 .PHONY: check
 check:
-	python setup.py -q nosetests -c playpen/noserc.dev
+	$(PYTHON) setup.py -q nosetests -c playpen/noserc.dev
+
+.PHONY: version_check
+version_check:
+# needs https://github.com/alikins/pyqver
+	-@TMPFILE=`mktemp` || exit 1; \
+	pyqver2.py -v -m 2.5  $(STYLEFILES) | tee $$TMPFILE; \
+	! test -s $$TMPFILE
 
 .PHONY: coverage
 coverage:
 ifdef ghprbPullId
 	# Pull the PR id from the Jenkins environment and use it as a seed so that each PR
 	# uses a consistant test ordering.
-	./setup.py -q nosetests --randomly-seed=$(ghprbPullId) -c playpen/noserc.ci
+	$(PYTHON) ./setup.py -q nosetests --randomly-seed=$(ghprbPullId) -c playpen/noserc.ci
 else
-	./setup.py -q nosetests -c playpen/noserc.ci
+	$(PYTHON) ./setup.py -q nosetests -c playpen/noserc.ci
 endif
+
+.PHONY: docs
+docs:
+	$(PYTHON) setup.py build_sphinx
 
 .PHONY: gettext
 gettext:
 	# Extract strings from our source files. any comments on the line above
 	# the string marked for translation beginning with "translators" will be
 	# included in the pot file.
-	./setup.py gettext
+	$(PYTHON) ./setup.py gettext
 
 .PHONY: update-po
 update-po:
-	./setup.py update_trans
+	$(PYTHON) ./setup.py update_trans
 
 .PHONY: uniq-po
 uniq-po:
-	./setup.py uniq_trans
+	$(PYTHON) ./setup.py uniq_trans
 
 # just run a check to make sure these compile
 .PHONY: polint
 polint:
-	./setup.py gettext --lint
+	$(PYTHON) ./setup.py gettext --lint
 
 .PHONY: just-strings
 just-strings:
@@ -397,22 +458,22 @@ gen-test-long-po:
 
 .PHONY: lint
 lint:
-	./setup.py lint
+	$(PYTHON) ./setup.py lint
 
 .PHONY: flake8
 flake8:
-	./setup.py flake8
+	$(PYTHON) ./setup.py flake8
 
 .PHONY: rpmlint
 rpmlint:
-	./setup.py lint_rpm
+	$(PYTHON) ./setup.py lint_rpm
 
 .PHONY: stylish
 stylish: lint
 
 .PHONY: install-pip-requirements
 install-pip-requirements:
-	@pip install -r test-requirements.txt
+	@pip install -I -r test-requirements.txt
 
 .PHONY: jenkins
 jenkins: install-pip-requirements build stylish coverage

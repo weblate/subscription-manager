@@ -22,8 +22,10 @@ import six
 
 from mock import patch
 from mock import Mock
+from mock import mock_open
 
 import test.fixture
+from test.fixture import OPEN_FUNCTION
 from rhsmlib.facts import hwprobe
 
 PROC_BONDING_RR = """Ethernet Channel Bonding Driver: v3.6.0 (September 26, 2009)
@@ -76,6 +78,24 @@ Duplex: full
 Link Failure Count: 0
 Permanent HW addr: 52:54:00:66:20:f7
 Slave queue ID: 0
+"""
+
+PROC_STAT = """cpu  1251631 1521 234099 26677635 43020 53378 18245 0 136791 0
+cpu0 170907 672 36975 5235552 21053 18369 7169 0 8215 0
+cpu1 162918 87 22790 3049644 2898 7180 2735 0 37398 0
+cpu2 167547 104 36469 3045029 6222 6375 2022 0 5443 0
+cpu3 116384 86 21325 3103226 2006 3503 999 0 3330 0
+cpu4 214747 243 36747 3002774 3602 6008 1688 0 51985 0
+cpu5 116967 88 20921 3104477 1791 3092 875 0 4196 0
+cpu6 182738 158 37153 3035995 3449 6016 1926 0 19461 0
+cpu7 119420 79 21716 3100934 1997 2833 828 0 6759 0
+intr 69987280 31 176 0 0 0 0 0 0 1 11832 0 0 723 0 0 0 67 0 26095 0 0 0 0 77 0 0 733270 16903338 0 305 2485413 22 35708 147 618373 6713 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+ctxt 176256990
+btime 1524062304
+processes 66111
+procs_running 2
+procs_blocked 1
+softirq 40290891 49 19260365 9256 986071 674800 7 521934 11078954 0 7759455
 """
 
 OS_RELEASE = """NAME="Awesome OS"
@@ -176,14 +196,14 @@ class HardwareProbeTest(test.fixture.SubManFixture):
         self.hw_check_topo_patcher.stop()
         super(HardwareProbeTest, self).tearDown()
 
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_distro_no_release(self, MockOpen):
         hw = hwprobe.HardwareCollector()
         MockOpen.side_effect = IOError()
         self.assertRaises(IOError, hw.get_release_info)
 
     @patch("os.path.exists")
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_distro_bogus_content_no_platform_module(self, MockOpen, MockExists):
         hw = hwprobe.HardwareCollector()
         MockExists.side_effect = [False, True]
@@ -198,7 +218,7 @@ class HardwareProbeTest(test.fixture.SubManFixture):
             self.assertEqual(hw.get_release_info(), expected)
 
     @patch("os.path.exists")
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_distro(self, MockOpen, MockExists):
         MockExists.side_effect = [False, True]
         hw = hwprobe.HardwareCollector()
@@ -212,7 +232,7 @@ class HardwareProbeTest(test.fixture.SubManFixture):
         self.assertEqual(hw.get_release_info(), expected)
 
     @patch("os.path.exists")
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_distro_newline_in_release(self, MockOpen, MockExists):
         hw = hwprobe.HardwareCollector()
         MockExists.side_effect = [False, True]
@@ -226,7 +246,7 @@ class HardwareProbeTest(test.fixture.SubManFixture):
         self.assertEqual(hw.get_release_info(), expected)
 
     @patch("os.path.exists")
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_manual_distro_bogus_content_os_release(self, MockOpen, MockExists):
         hw = hwprobe.HardwareCollector()
         with patch('rhsmlib.facts.hwprobe.platform'):
@@ -241,12 +261,10 @@ class HardwareProbeTest(test.fixture.SubManFixture):
             self.assertEqual(hw.get_release_info(), expected)
 
     @patch("os.path.exists")
-    @patch("__builtin__.open")
-    def test_distro_with_platform(self, MockOpen, MockExists):
+    @patch(OPEN_FUNCTION, mock_open(read_data="Awesome OS release 42 Mega (Go4It)"))  # TODO figure out why necessary...
+    def test_distro_with_platform(self, MockExists):
         MockExists.return_value = False
         hw = hwprobe.HardwareCollector()
-        MockOpen.return_value.readline.return_value = "Awesome OS release 42 (Go4It)"
-        MockOpen.return_value.read.return_value = "Awesome OS release 42 (Go4It)"
         expected = {
             'distribution.version': '42',
             'distribution.name': 'Awesome OS',
@@ -256,7 +274,7 @@ class HardwareProbeTest(test.fixture.SubManFixture):
         self.assertEqual(hw.get_release_info(), expected)
 
     @patch("os.path.exists")
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_manual_distro_with_modifier(self, MockOpen, MockExists):
         MockExists.side_effect = [False, True]
         hw = hwprobe.HardwareCollector()
@@ -271,7 +289,7 @@ class HardwareProbeTest(test.fixture.SubManFixture):
             self.assertEqual(hw.get_release_info(), expected)
 
     @patch("os.path.exists")
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_distro_os_release(self, MockOpen, MockExists):
         MockExists.return_value = True
         hw = hwprobe.HardwareCollector()
@@ -286,7 +304,7 @@ class HardwareProbeTest(test.fixture.SubManFixture):
             self.assertEqual(hw.get_release_info(), expected)
 
     @patch("os.path.exists")
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_distro_os_release_colon(self, MockOpen, MockExists):
         MockExists.return_value = True
         hw = hwprobe.HardwareCollector()
@@ -434,7 +452,7 @@ class HardwareProbeTest(test.fixture.SubManFixture):
         self.assertEqual(net_int['net.interface.lo.ipv6_address.global'], '::1')
         self.assertFalse('net.interface.lo.mac_address' in net_int)
 
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_get_slave_hwaddr_rr(self, MockOpen):
         MockOpen.return_value = six.StringIO(PROC_BONDING_RR)
         hw = hwprobe.HardwareCollector()
@@ -442,7 +460,7 @@ class HardwareProbeTest(test.fixture.SubManFixture):
         # note we .upper the result
         self.assertEqual("52:54:00:07:03:BA", slave_hw)
 
-    @patch("__builtin__.open")
+    @patch(OPEN_FUNCTION)
     def test_get_slave_hwaddr_alb(self, MockOpen):
         MockOpen.return_value = six.StringIO(PROC_BONDING_ALB)
         hw = hwprobe.HardwareCollector()
@@ -467,6 +485,14 @@ class HardwareProbeTest(test.fixture.SubManFixture):
         self.assertEqual(4, ret['book_count'])
         self.assertEqual(6, ret['sockets_per_book'])
         self.assertEqual(4, ret['cores_per_socket'])
+
+    @patch(OPEN_FUNCTION, mock_open(read_data=PROC_STAT))
+    def test_parse_proc_stat_btime(self):
+        expected_btime = "1524062304"
+
+        hw = hwprobe.HardwareCollector()
+        ret = hw.get_proc_stat()
+        self.assertEqual(expected_btime, ret['proc_stat.btime'])
 
     @patch.object(hwprobe.HardwareCollector, 'count_cpumask_entries')
     @patch("os.listdir")
@@ -688,7 +714,7 @@ class TestLscpu(unittest.TestCase):
     def test_lscpu_ignores_locale(self):
         hw_check_topo = hwprobe.HardwareCollector()
         facts = hw_check_topo.get_ls_cpu_info()
-        # if all values can be decoded as ascii, then lscpu is not using JP locale
+        # if all values can be encoded as ascii, then lscpu is not using JP locale
         for key, value in facts.items():
-            key.decode('ascii')
-            value.decode('ascii')
+            key.encode('ascii')
+            value.encode('ascii')

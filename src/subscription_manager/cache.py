@@ -28,13 +28,13 @@ from rhsm.https import ssl
 
 from rhsm.config import initConfig
 import rhsm.connection as connection
-from rhsm.profile import get_profile, RPMProfile
+from rhsm.profile import get_profile
 import subscription_manager.injection as inj
 from subscription_manager.jsonwrapper import PoolWrapper
 from rhsm import ourjson as json
 from subscription_manager.isodate import parse_date
 
-from rhsmlib.services import config
+from rhsmlib.services import config, syspurpose
 
 from subscription_manager.i18n import ugettext as _
 
@@ -70,7 +70,7 @@ class CacheManager(object):
         """
         raise NotImplementedError
 
-    def _sync_with_server(self, uep, consumer_uuid):
+    def _sync_with_server(self, uep, consumer_uuid, *args, **kwargs):
         """
         Sync the latest data to/from the server.
         """
@@ -121,6 +121,7 @@ class CacheManager(object):
         Load the last data we sent to the server.
         Returns none if no cache file exists.
         """
+
         try:
             f = open(self.CACHE_FILE)
             data = self._load_data(f)
@@ -195,7 +196,7 @@ class StatusCache(CacheManager):
         self.server_status = None
         self.last_error = None
 
-    def load_status(self, uep, uuid):
+    def load_status(self, uep, uuid, on_date=None):
         """
         Load status from wherever is appropriate.
 
@@ -208,7 +209,7 @@ class StatusCache(CacheManager):
         Returns None if we cannot reach the server, or use the cache.
         """
         try:
-            self._sync_with_server(uep, uuid)
+            self._sync_with_server(uep, uuid, on_date)
             self.write_cache()
             self.last_error = False
             return self.server_status
@@ -227,8 +228,6 @@ class StatusCache(CacheManager):
             self.last_error = ex
             log.error("Bad identity, unable to connect to server")
             return None
-        except connection.GoneException:
-            raise
         # all of the abover are subclasses of ConnectionException that
         # get handled first
         except (connection.ConnectionException, connection.RateLimitExceededException,
@@ -316,8 +315,31 @@ class EntitlementStatusCache(StatusCache):
     """
     CACHE_FILE = "/var/lib/rhsm/cache/entitlement_status.json"
 
-    def _sync_with_server(self, uep, uuid):
-        self.server_status = uep.getCompliance(uuid)
+    def _sync_with_server(self, uep, uuid, on_date=None, *args, **kwargs):
+        self.server_status = uep.getCompliance(uuid, on_date)
+
+
+class SyspurposeComplianceStatusCache(StatusCache):
+    """
+    Manages the system cache of system purpose compliance status from the server.
+    Unlike other cache managers, this one gets info from the server rather
+    than sending it.
+    """
+    CACHE_FILE = "/var/lib/rhsm/cache/syspurpose_compliance_status.json"
+
+    def _sync_with_server(self, uep, uuid, on_date=None, *args, **kwargs):
+        self.syspurpose_service = syspurpose.Syspurpose(uep)
+        self.server_status = self.syspurpose_service.get_syspurpose_status(on_date)
+
+    def write_cache(self):
+        if self.server_status is not None and self.server_status['status'] != 'unknown':
+            super(SyspurposeComplianceStatusCache, self).write_cache()
+
+    def get_overall_status(self):
+        if self.server_status is not None:
+            return self.syspurpose_service.get_overall_status(self.server_status['status'])
+        else:
+            return self.syspurpose_service.get_overall_status('unknown')
 
 
 class ProductStatusCache(StatusCache):
@@ -326,7 +348,7 @@ class ProductStatusCache(StatusCache):
     """
     CACHE_FILE = "/var/lib/rhsm/cache/product_status.json"
 
-    def _sync_with_server(self, uep, uuid):
+    def _sync_with_server(self, uep, uuid, *args, **kwargs):
         consumer_data = uep.getConsumer(uuid)
 
         if 'installedProducts' not in consumer_data:
@@ -341,7 +363,7 @@ class OverrideStatusCache(StatusCache):
     """
     CACHE_FILE = "/var/lib/rhsm/cache/content_overrides.json"
 
-    def _sync_with_server(self, uep, consumer_uuid):
+    def _sync_with_server(self, uep, consumer_uuid, *args, **kwargs):
         self.server_status = uep.getContentOverrides(consumer_uuid)
 
 
@@ -351,7 +373,7 @@ class ReleaseStatusCache(StatusCache):
     """
     CACHE_FILE = "/var/lib/rhsm/cache/releasever.json"
 
-    def _sync_with_server(self, uep, consumer_uuid):
+    def _sync_with_server(self, uep, consumer_uuid, *args, **kwargs):
         def get_release(uuid):
 
             # To mimic connection problems you can raise required exception:
@@ -367,40 +389,59 @@ class ReleaseStatusCache(StatusCache):
 # this is injected normally
 class ProfileManager(CacheManager):
     """
-    Manages the profile of packages installed on this system.
+    Manages profile of installed packages, enabled repositories and plugins
     """
-    CACHE_FILE = "/var/lib/rhsm/packages/packages.json"
 
-    def __init__(self, current_profile=None):
+    CACHE_FILE = "/var/lib/rhsm/cache/profile.json"
 
+    def __init__(self):
         # Could be None, we'll read the system's current profile later once
         # we're sure we actually need the data.
-        self._current_profile = current_profile
-        self._report_package_profile = conf['rhsm'].get_int('report_package_profile')
+        self._current_profile = None
+        self.report_package_profile = self.profile_reporting_enabled()
+
+    def profile_reporting_enabled(self):
+        # If profile reporting is disabled from the environment, that overrides the setting in the conf file
+        # If the environment variable is 0, defer to the setting in the conf file; likewise if the environment
+        # variable is completely unset.
+        if 'SUBMAN_DISABLE_PROFILE_REPORTING' in os.environ and \
+            os.environ['SUBMAN_DISABLE_PROFILE_REPORTING'].lower() in ['true', '1', 'yes', 'on']:
+            return False
+        return conf['rhsm'].get_int('report_package_profile') == 1
 
     # give tests a chance to use something other than RPMProfile
     def _get_profile(self, profile_type):
         return get_profile(profile_type)
 
-    def _get_current_profile(self):
-        # If we weren't given a profile, load the current systems packages:
+    @staticmethod
+    def _assembly_profile(rpm_profile, enabled_repos_profile, module_profile):
+        combined_profile = {
+            'rpm': rpm_profile,
+            'enabled_repos': enabled_repos_profile,
+            'modulemd': module_profile
+        }
+        return combined_profile
+
+    @property
+    def current_profile(self):
         if not self._current_profile:
-            self._current_profile = self._get_profile('rpm')
+            rpm_profile = get_profile('rpm').collect()
+            enabled_repos = get_profile('enabled_repos').collect()
+            module_profile = get_profile('modulemd').collect()
+            combined_profile = self._assembly_profile(rpm_profile, enabled_repos, module_profile)
+            self._current_profile = combined_profile
         return self._current_profile
 
-    def _set_current_profile(self, value):
-        self._current_profile = value
-
-    def _set_report_package_profile(self, value):
-        self._report_package_profile = value
-
-    current_profile = property(_get_current_profile, _set_current_profile)
+    @current_profile.setter
+    def current_profile(self, new_profile):
+        self._current_profile = new_profile
 
     def to_dict(self):
-        return self.current_profile.collect()
+        return self.current_profile
 
     def _load_data(self, open_file):
-        return RPMProfile(from_file=open_file)
+        json_str = open_file.read()
+        return json.loads(json_str)
 
     def update_check(self, uep, consumer_uuid, force=False):
         """
@@ -409,26 +450,55 @@ class ProfileManager(CacheManager):
 
         # If the server doesn't support packages, don't try to send the profile:
         if not uep.supports_resource(PACKAGES_RESOURCE):
-            log.info("Server does not support packages, skipping profile upload.")
+            log.warn("Server does not support packages, skipping profile upload.")
             return 0
 
-        if not self._report_package_profile:
-            log.info("Skipping package profile upload due to report_package_profile setting.")
+        if force or self.report_package_profile:
+            return CacheManager.update_check(self, uep, consumer_uuid, force)
+        elif not self.report_package_profile:
+            log.warn("Skipping package profile upload due to report_package_profile setting.")
             return 0
-
-        return CacheManager.update_check(self, uep, consumer_uuid, force)
+        else:
+            return 0
 
     def has_changed(self):
         if not self._cache_exists():
-            log.debug("Cache does not exist")
+            log.debug("Cache file %s does not exist" % self.CACHE_FILE)
             return True
 
         cached_profile = self._read_cache()
         return not cached_profile == self.current_profile
 
-    def _sync_with_server(self, uep, consumer_uuid):
-        uep.updatePackageProfile(consumer_uuid,
-                self.current_profile.collect())
+    def _sync_with_server(self, uep, consumer_uuid, *args, **kwargs):
+        """
+        This method has to be able to sync combined profile, when server supports this functionality
+        and it also has to be able to send only profile containing list of installed RPMs.
+        """
+        combined_profile = self.current_profile
+        if uep.has_capability("combined_reporting"):
+            _combined_profile = [
+                {
+                    "content_type": "rpm",
+                    "profile": combined_profile["rpm"]
+                },
+                {
+                    "content_type": "enabled_repos",
+                    "profile": combined_profile["enabled_repos"]
+                },
+                {
+                    "content_type": "modulemd",
+                    "profile": combined_profile["modulemd"]
+                },
+            ]
+            uep.updateCombinedProfile(
+                consumer_uuid,
+                _combined_profile
+            )
+        else:
+            uep.updatePackageProfile(
+                consumer_uuid,
+                combined_profile["rpm"]
+            )
 
 
 class InstalledProductsManager(CacheManager):
@@ -468,7 +538,7 @@ class InstalledProductsManager(CacheManager):
 
     def has_changed(self):
         if not self._cache_exists():
-            log.debug("Cache does not exist")
+            log.debug("Cache file %s does not exist" % self.CACHE_FILE)
             return True
 
         cached = self._read_cache()
@@ -518,7 +588,7 @@ class InstalledProductsManager(CacheManager):
         final = [val for (key, val) in list(self.installed.items())]
         return final
 
-    def _sync_with_server(self, uep, consumer_uuid):
+    def _sync_with_server(self, uep, consumer_uuid, *args, **kwargs):
         uep.updateConsumer(consumer_uuid,
                 installed_products=self.format_for_server(),
                 content_tags=self.tags)
@@ -530,7 +600,7 @@ class PoolStatusCache(StatusCache):
     """
     CACHE_FILE = "/var/lib/rhsm/cache/pool_status.json"
 
-    def _sync_with_server(self, uep, uuid):
+    def _sync_with_server(self, uep, uuid, *args, **kwargs):
         self.server_status = uep.getEntitlementList(uuid)
 
 
@@ -627,7 +697,7 @@ class ContentAccessCache(object):
             return
         with open(cert.path, "w") as output:
             updated_cert = "".join(data["contentListing"][str(cert.serial)])
-            log.info("Updating certificate %s with new content" % cert.serial)
+            log.debug("Updating certificate %s with new content" % cert.serial)
             output.write(updated_cert)
 
     def _update_cache(self, data):

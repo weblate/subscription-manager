@@ -28,6 +28,7 @@ import subscription_manager.injection as inj
 import subscription_manager.managercli as managercli
 from subscription_manager.managercli import CliCommand
 from subscription_manager.cli import InvalidCLIOptionError, system_exit
+from subscription_manager.certdirectory import DEFAULT_PRODUCT_CERT_DIR
 from rhsm import ourjson as json
 from rhsm.config import initConfig
 from rhsmlib.services import config
@@ -85,11 +86,10 @@ class SystemCommand(CliCommand):
         return _("%%prog %s [OPTIONS] ") % self.name
 
     def _validate_options(self):
-        if self.options.archive:
-            if self.options.destination and not os.path.exists(self.options.destination):
-                raise InvalidCLIOptionError(_("The destination directory for the archive must already exist."))
+        if self.options.destination and not os.path.exists(self.options.destination):
+            raise InvalidCLIOptionError(_("The directory specified by '--destination' must already exist."))
         # no archive, check if we can safely copy to dest.
-        else:
+        if not self.options.archive:
             if not self._dirs_on_same_device(self.assemble_path, self.options.destination):
                 msg = _("To use the no-archive option, the destination directory '%s' "
                         "must exist on the same file system as the "
@@ -97,7 +97,7 @@ class SystemCommand(CliCommand):
                 raise InvalidCLIOptionError(msg)
         # In case folks are using this in a script
         if self.options.placeholder_for_subscriptions_option:
-            log.info("The rhsm-debug options '--subscriptions' and '--no-subscriptions' have no effect now.")
+            log.debug("The rhsm-debug options '--subscriptions' and '--no-subscriptions' have no effect now.")
 
     def _dirs_on_same_device(self, dir1, dir2):
         return os.stat(dir1).st_dev == os.stat(dir2).st_dev
@@ -146,7 +146,7 @@ class SystemCommand(CliCommand):
                 self._copy_directory('/var/lib/rhsm', content_path)
 
             if not sos:
-                self._copy_cert_directory('/etc/pki/product-default', content_path)
+                self._copy_cert_directory(DEFAULT_PRODUCT_CERT_DIR, content_path)
 
             if defaults['productcertdir'] != conf['rhsm']['productCertDir'] or not sos:
                 self._copy_cert_directory(conf['rhsm']['productCertDir'], content_path)
@@ -217,8 +217,7 @@ class SystemCommand(CliCommand):
     def _get_version_info(self):
         return {"server type": self.server_versions["server-type"],
                 "subscription management server": self.server_versions["candlepin"],
-                "subscription-manager": self.client_versions["subscription-manager"],
-                "python-rhsm": self.client_versions["python-rhsm"]}
+                "subscription-manager": self.client_versions["subscription-manager"]}
 
     def _write_flat_file(self, content_path, filename, content):
         path = os.path.join(content_path, filename)
@@ -265,7 +264,7 @@ class SaferFileMove(object):
 
         If dest is /tmp, or a specific name in /tmp, we want to
         create it excl if we can."""
-        with open(src, 'r') as src_fo:
+        with open(src, 'rb') as src_fo:
             # if dest doesn't exist, and we can open it excl, then open it,
             # keep the fd, create a file object for it, and write to it
             with self._open_excl(dest) as dest_fo:
@@ -276,7 +275,7 @@ class SaferFileMove(object):
     def _open_excl(self, path):
         """Return a file object that we know we created and nothing else owns."""
         return os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL,
-                                 self.default_perms), 'w+')
+                                 self.default_perms), 'wb+')
 
     def _copyfileobj(self, src_fo, dest_fo):
         while True:

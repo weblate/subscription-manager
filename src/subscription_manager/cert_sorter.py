@@ -22,7 +22,7 @@ from rhsm.connection import RestlibException
 import subscription_manager.injection as inj
 from subscription_manager.isodate import parse_date
 from subscription_manager.reasons import Reasons
-from subscription_manager import file_monitor
+from rhsmlib import file_monitor
 from subscription_manager import utils
 
 from subscription_manager.i18n import ugettext as _
@@ -44,6 +44,7 @@ RAM_FACT = 'memory.memtotal'
 STATUS_MAP = {'valid': _('Current'),
         'partial': _('Insufficient'),
         'invalid': _('Invalid'),
+        'disabled': _('Disabled'),
         'unknown': _('Unknown')}
 
 RHSM_VALID = 0
@@ -146,7 +147,7 @@ class ComplianceManager(object):
 
         if 'status' in status and len(status['status']):
             self.system_status = status['status']
-        #Some old candlepin versions do not return 'status' with information
+        # Some old candlepin versions do not return 'status' with information
         elif status['nonCompliantProducts']:
             self.system_status = 'invalid'
         elif self.partially_valid_products or self.partial_stacks or \
@@ -176,7 +177,7 @@ class ComplianceManager(object):
                     self.partially_valid_products and pid not in \
                     unentitled_pids:
                 log.warn("Installed product %s not present in response from "
-                        "server." % pid)
+                         "server." % pid)
                 unentitled_pids.append(pid)
 
         for unentitled_pid in unentitled_pids:
@@ -184,7 +185,7 @@ class ComplianceManager(object):
             # Ignore anything server thinks we have but we don't.
             if prod_cert is None:
                 log.warn("Server reported installed product not on system: %s" %
-                        unentitled_pid)
+                         unentitled_pid)
                 continue
             self.unentitled_products[unentitled_pid] = prod_cert
 
@@ -195,7 +196,7 @@ class ComplianceManager(object):
     def log_products(self):
         fj = utils.friendly_join
 
-        log.info("Product status: valid_products=%s partial_products=%s expired_products=%s"
+        log.debug("Product status: valid_products=%s partial_products=%s expired_products=%s"
                  " unentitled_producs=%s future_products=%s valid_until=%s",
                  fj(list(self.valid_products.keys())),
                  fj(list(self.partially_valid_products.keys())),
@@ -257,7 +258,7 @@ class ComplianceManager(object):
         Return true if the results of this cert sort indicate our
         entitlements are completely valid.
         """
-        return self.system_status == 'valid'
+        return self.system_status == 'valid' or self.system_status == 'disabled'
 
     def is_registered(self):
         return inj.require(inj.IDENTITY).is_valid()
@@ -325,22 +326,24 @@ class CertSorter(ComplianceManager):
         super(CertSorter, self).__init__(on_date)
         self.callbacks = set()
 
-        cert_dir_monitors = [file_monitor.MonitorDirectory(inj.require(inj.PROD_DIR).path,
-                                                           self.on_prod_dir_changed),
-                             file_monitor.MonitorDirectory(inj.require(inj.ENT_DIR).path,
-                                                           self.on_ent_dir_changed),
-                             file_monitor.MonitorDirectory(inj.require(inj.IDENTITY).cert_dir_path,
-                                                           self.on_identity_changed)]
+        cert_dir_monitors = [file_monitor.DirectoryWatch(inj.require(inj.PROD_DIR).path,
+                                                         [self.on_prod_dir_changed, self.load]),
+                             file_monitor.DirectoryWatch(inj.require(inj.ENT_DIR).path,
+                                                         [self.on_ent_dir_changed, self.load]),
+                             file_monitor.DirectoryWatch(inj.require(inj.IDENTITY).cert_dir_path,
+                                                         [self.on_identity_changed, self.load])]
 
         # Note: no timer is setup to poll file_monitor by cert_sorter itself,
         # the gui can add one.
-        self.cert_monitor = \
-            file_monitor.MonitorDirectories(dir_monitors=cert_dir_monitors,
-                                            changed_callback=self.on_certs_changed)
+        self.cert_monitor = file_monitor.FilesystemWatcher(cert_dir_monitors)
 
     def get_compliance_status(self):
         status_cache = inj.require(inj.ENTITLEMENT_STATUS_CACHE)
-        return status_cache.load_status(self.cp_provider.get_consumer_auth_cp(), self.identity.uuid)
+        return status_cache.load_status(
+            self.cp_provider.get_consumer_auth_cp(),
+            self.identity.uuid,
+            self.on_date
+        )
 
     def update_product_manager(self):
         if self.is_registered():

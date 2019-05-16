@@ -18,7 +18,9 @@ from __future__ import print_function, division, absolute_import
 import os
 
 from subscription_manager import injection as inj
+from subscription_manager.action_client import ProfileActionClient
 from subscription_manager.repolib import RepoActionInvoker
+from subscription_manager.entcertlib import EntCertActionInvoker
 from rhsmlib.facts.hwprobe import ClassicCheck
 from subscription_manager.utils import chroot
 from subscription_manager.injectioninit import init_dep_injection
@@ -52,8 +54,9 @@ class SubscriptionManager(dnf.Plugin):
         super(SubscriptionManager, self).__init__(base, cli)
         self.base = base
         self.cli = cli
+        self._config()
 
-    def config(self):
+    def _config(self):
         """ update """
         logutil.init_logger_for_yum()
 
@@ -102,8 +105,12 @@ class SubscriptionManager(dnf.Plugin):
         if config.in_container():
             logger.info(_("Subscription Manager is operating in container mode."))
 
-        rl = RepoActionInvoker(cache_only=cache_only)
-        rl.update()
+        if not cache_only and not config.in_container():
+            cert_action_invoker = EntCertActionInvoker()
+            cert_action_invoker.update()
+
+        repo_action_invoker = RepoActionInvoker(cache_only=cache_only)
+        repo_action_invoker.update()
 
     def _warnExpired(self):
         """ display warning for expired entitlements """
@@ -134,3 +141,15 @@ class SubscriptionManager(dnf.Plugin):
         finally:
             if msg:
                 logger.info(msg)
+
+    def transaction(self):
+        """
+        Call Package Profile
+        """
+        cfg = config.initConfig()
+        if '1' == cfg.get('rhsm', 'package_profile_on_trans'):
+            package_profile_client = ProfileActionClient()
+            package_profile_client.update()
+        else:
+            # do nothing
+            return

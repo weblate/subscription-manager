@@ -17,6 +17,7 @@ import sys
 import six
 import decorator
 import dbus.service
+import json
 
 from rhsmlib.dbus import exceptions
 
@@ -25,6 +26,7 @@ log = logging.getLogger(__name__)
 __all__ = [
     'dbus_handle_exceptions',
     'dbus_service_method',
+    'dbus_service_signal'
 ]
 
 
@@ -37,10 +39,17 @@ def dbus_handle_exceptions(func, *args, **kwargs):
     except dbus.DBusException as e:
         log.exception(e)
         raise
-    except Exception as e:
-        log.exception(e)
+    except Exception as err:
+        log.exception(err)
         trace = sys.exc_info()[2]
-        six.reraise(exceptions.RHSM1DBusException, "%s: %s" % (type(e).__name__, str(e)), trace)
+        # Raise exception string as JSON string. Thus it can be parsed and printed properly.
+        error_msg = json.dumps(
+            {
+                "exception": type(err).__name__,
+                "message": str(err)
+            }
+        )
+        six.reraise(exceptions.RHSM1DBusException, exceptions.RHSM1DBusException(error_msg), trace)
 
 
 def dbus_service_method(*args, **kwargs):
@@ -48,3 +57,13 @@ def dbus_service_method(*args, **kwargs):
     # defined.
     kwargs.setdefault("sender_keyword", "sender")
     return dbus.service.method(*args, **kwargs)
+
+
+def dbus_service_signal(*args, **kwargs):
+    """
+    Decorator used for signal
+    :param args:
+    :param kwargs:
+    :return:
+    """
+    return dbus.service.signal(*args, **kwargs)

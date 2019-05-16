@@ -31,12 +31,13 @@ import subscription_manager.cache as cache
 from subscription_manager.cert_sorter import StackingGroupSorter, ComplianceManager
 from subscription_manager import identity
 from subscription_manager.injection import require, CERT_SORTER, \
-        IDENTITY, ENTITLEMENT_STATUS_CACHE, \
+        IDENTITY, ENTITLEMENT_STATUS_CACHE, SYSTEMPURPOSE_COMPLIANCE_STATUS_CACHE, \
         PROD_STATUS_CACHE, ENT_DIR, PROD_DIR, CP_PROVIDER, OVERRIDE_STATUS_CACHE, \
         POOLTYPE_CACHE, RELEASE_STATUS_CACHE, FACTS, POOL_STATUS_CACHE
 from subscription_manager import isodate
 from subscription_manager.jsonwrapper import PoolWrapper
 from subscription_manager.repolib import RepoActionInvoker
+from subscription_manager.syspurposelib import SyncedStore
 from subscription_manager import utils
 
 # FIXME FIXME
@@ -68,7 +69,7 @@ def persist_consumer_cert(consumerinfo):
         os.mkdir(cert_dir)
     consumer = identity.ConsumerIdentity(consumerinfo['idCert']['key'], consumerinfo['idCert']['cert'])
     consumer.write()
-    log.info("Consumer created: %s (%s)" % (consumer.getConsumerName(), consumer.getConsumerId()))
+    log.debug("Consumer created: %s (%s)" % (consumer.getConsumerName(), consumer.getConsumerId()))
     system_log("Registered system with identity: %s" % consumer.getConsumerId())
 
 
@@ -251,7 +252,8 @@ class PoolFilter(object):
         return filtered_pools
 
 
-def list_pools(uep, consumer_uuid, list_all=False, active_on=None, filter_string=None):
+def list_pools(uep, consumer_uuid, list_all=False, active_on=None, filter_string=None, future=None,
+               after_date=None):
     """
     Wrapper around the UEP call to fetch pools, which forces a facts update
     if anything has changed before making the request. This ensures the
@@ -283,14 +285,16 @@ def list_pools(uep, consumer_uuid, list_all=False, active_on=None, filter_string
     ownerid = owner['key']
 
     return uep.getPoolsList(consumer=consumer_uuid, listAll=list_all,
-            active_on=active_on, owner=ownerid, filter_string=filter_string)
+            active_on=active_on, owner=ownerid, filter_string=filter_string, future=future,
+                            after_date=after_date)
 
 
 # TODO: This method is morphing the actual pool json and returning a new
 # dict which does not contain all the pool info. Not sure if this is really
 # necessary. Also some "view" specific things going on in here.
 def get_available_entitlements(get_all=False, active_on=None, overlapping=False,
-                               uninstalled=False, text=None, filter_string=None):
+                               uninstalled=False, text=None, filter_string=None,
+                               future=None, after_date=None):
     """
     Returns a list of entitlement pools from the server.
 
@@ -301,6 +305,7 @@ def get_available_entitlements(get_all=False, active_on=None, overlapping=False,
         'id',
         'quantity',
         'consumed',
+        'startDate',
         'endDate',
         'productName',
         'providedProducts',
@@ -316,7 +321,7 @@ def get_available_entitlements(get_all=False, active_on=None, overlapping=False,
 
     pool_stash = PoolStash()
     dlist = pool_stash.get_filtered_pools_list(active_on, not get_all,
-           overlapping, uninstalled, text, filter_string)
+           overlapping, uninstalled, text, filter_string, future=future, after_date=after_date)
 
     for pool in dlist:
         pool_wrapper = PoolWrapper(pool)
@@ -345,6 +350,7 @@ def get_available_entitlements(get_all=False, active_on=None, overlapping=False,
         else:
             d['quantity'] = str(int(d['quantity']) - int(d['consumed']))
 
+        d['startDate'] = format_date(isodate.parse_date(d['startDate']))
         d['endDate'] = format_date(isodate.parse_date(d['endDate']))
         del d['consumed']
 
@@ -506,7 +512,7 @@ class PoolStash(object):
         log.debug("   %s already subscribed" % len(self.subscribed_pool_ids))
 
     def get_filtered_pools_list(self, active_on, incompatible,
-            overlapping, uninstalled, text, filter_string):
+            overlapping, uninstalled, text, filter_string, future=None, after_date=None):
         """
         Used for CLI --available filtering
         cuts down on api calls
@@ -520,11 +526,13 @@ class PoolStash(object):
 
         if incompatible:
             for pool in list_pools(require(CP_PROVIDER).get_consumer_auth_cp(),
-                    self.identity.uuid, active_on=active_on, filter_string=filter_string):
+                self.identity.uuid, active_on=active_on,
+                filter_string=filter_string, future=future, after_date=after_date):
                 self.compatible_pools[pool['id']] = pool
         else:  # --all has been used
             for pool in list_pools(require(CP_PROVIDER).get_consumer_auth_cp(),
-                    self.identity.uuid, list_all=True, active_on=active_on, filter_string=filter_string):
+                self.identity.uuid, list_all=True, active_on=active_on,
+                filter_string=filter_string, future=future, after_date=after_date):
                 self.all_pools[pool['id']] = pool
 
         return self._filter_pools(incompatible, overlapping, uninstalled, False, text)
@@ -849,24 +857,24 @@ def clean_all_data(backup=True):
     # for deleting persistent caches
     cache.ProfileManager.delete_cache()
     cache.InstalledProductsManager.delete_cache()
-
+    if SyncedStore is not None:
+        SyncedStore(None).update_cache({})
     # FIXME: implement as dbus client to facts service DeleteCache() once implemented
-    #Facts.delete_cache()
-
+    # Facts.delete_cache()
     # WrittenOverridesCache is also a subclass of cache.CacheManager, but
     # it is deleted in RepoActionInvoker.delete_repo_file() below.
-
     # StatusCache subclasses have a a per instance cache varable
     # and delete_cache is an instance method, so we need to call
     # the delete_cache on the instances created in injectioninit.
     require(ENTITLEMENT_STATUS_CACHE).delete_cache()
+    require(SYSTEMPURPOSE_COMPLIANCE_STATUS_CACHE).delete_cache()
     require(PROD_STATUS_CACHE).delete_cache()
     require(POOL_STATUS_CACHE).delete_cache()
     require(OVERRIDE_STATUS_CACHE).delete_cache()
     require(RELEASE_STATUS_CACHE).delete_cache()
 
     RepoActionInvoker.delete_repo_file()
-    log.info("Cleaned local data")
+    log.debug("Cleaned local data")
 
 
 def valid_quantity(quantity):
