@@ -631,10 +631,13 @@ class BaseRestLib(object):
             if os.path.isdir('/tmp/sub-man') is False:
                 os.mkdir('/tmp/sub-man')
             if 'SUBMAN_DEBUG_SAVE_TRACEBACKS' in os.environ:
-                with tempfile.NamedTemporaryFile(dir='/tmp/sub-man', prefix='traceback-', delete=False) as tmp_file:
-                    traceback.print_stack(file=tmp_file)
+                with tempfile.NamedTemporaryFile(
+                        dir='/tmp/sub-man',
+                        mode='w',
+                        prefix='traceback-',
+                        delete=False) as tmp_file:
+                    traceback.print_stack(file=tmp_file.file)
                     print(green_col + '    traceback saved in: %s' % tmp_file.name + end_col)
-                    # print(dir(tmp_file))
                     print()
 
     @staticmethod
@@ -949,6 +952,8 @@ class UEPConnection(BaseConnection):
         user_agent = "RHSM/1.0 (cmd=%s)" % utils.cmd_name(sys.argv)
         if 'client_version' in kwargs:
             user_agent += kwargs['client_version']
+        if 'dbus_sender' in kwargs:
+            user_agent += kwargs['dbus_sender']
         super(UEPConnection, self).__init__(user_agent=user_agent, **kwargs)
 
     def _load_supported_resources(self):
