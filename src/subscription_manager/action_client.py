@@ -57,15 +57,32 @@ class ActionClient(base_action_client.BaseActionClient):
         return lib_set
 
 
+class AutoRegistrationActionClient(base_action_client.BaseActionClient):
+    """
+    Class used for triggering automatic registration
+    """
+
+    def _get_libset(self):
+        """
+        Define the list of action invoker to be triggered during automatic registration
+        :return: list of action invoker used for automatic registration
+        """
+
+        self.installed_pro_lib = InstalledProductsActionInvoker()
+        self.syspurpose_lib = SyspurposeSyncActionInvoker()
+
+        return [self.installed_pro_lib, self.syspurpose_lib]
+
+
 class HealingActionClient(base_action_client.BaseActionClient):
     def _get_libset(self):
 
-        self.entcertlib = EntCertActionInvoker()
-        self.installedprodlib = InstalledProductsActionInvoker()
-        self.syspurposelib = SyspurposeSyncActionInvoker()
-        self.healinglib = HealingActionInvoker()
+        self.ent_cert_lib = EntCertActionInvoker()
+        self.installed_prod_lib = InstalledProductsActionInvoker()
+        self.syspurpose_lib = SyspurposeSyncActionInvoker()
+        self.healing_lib = HealingActionInvoker()
 
-        lib_set = [self.installedprodlib, self.syspurposelib, self.healinglib, self.entcertlib]
+        lib_set = [self.installed_prod_lib, self.syspurpose_lib, self.healing_lib, self.ent_cert_lib]
 
         return lib_set
 

@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 class BaseActionClient(object):
     """
-    An object used to update the certficates, yum repos, and facts for the system.
+    An object used to update the certificates, yum repos, and facts for the system.
     """
 
     def __init__(self, skips=None):
@@ -43,7 +43,7 @@ class BaseActionClient(object):
     def update(self, autoheal=False):
         """
         Update I{entitlement} certificates and corresponding
-        yum repositiories.
+        yum repositories.
         @return: A list of update reports
         @rtype: list
         """
@@ -61,7 +61,7 @@ class BaseActionClient(object):
 
         try:
             update_report = lib.update()
-        # see bz#852706, reraise GoneException so that
+        # see bz#852706, re-raise GoneException so that
         # consumer cert deletion works
         except GoneException as e:
             raise

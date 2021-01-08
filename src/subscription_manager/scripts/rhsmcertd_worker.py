@@ -41,7 +41,7 @@ ga_loader.init_ga()
 from subscription_manager.injectioninit import init_dep_injection
 init_dep_injection()
 
-from subscription_manager import action_client
+from subscription_manager.action_client import HealingActionClient, ActionClient, AutoRegistrationActionClient
 from subscription_manager import managerlib
 from subscription_manager.identity import ConsumerIdentity
 from subscription_manager.i18n_optparse import OptionParser, \
@@ -50,6 +50,8 @@ from optparse import SUPPRESS_HELP
 from subscription_manager.utils import generate_correlation_id
 
 from subscription_manager.i18n import ugettext as _
+
+from rhsmlib.cloud.utils import detect_cloud_provider, collect_cloud_metadata
 
 
 def exit_on_signal(_signumber, _stackframe):
@@ -76,6 +78,19 @@ def _main(options, log):
         log.warning('The rhsmcertd process has been disabled by configuration.')
         sys.exit(-1)
 
+    log.debug('check for auto-registration enabled')
+    if '1' == cfg.get('rhsmcertd', 'auto_registration'):
+        log.debug('Trying to detect cloud provider')
+        cloud_list = detect_cloud_provider()
+        if len(cloud_list) == 0:
+            log.warning('This system does not run on any supported cloud provider')
+            sys.exit(-1)
+        metadata = collect_cloud_metadata(cloud_list)
+        if len(metadata) == 0:
+            log.warning('It was not possible to collect any cloud metadata. Unable to perform auto-registration')
+        action_client = AutoRegistrationActionClient()
+        action_client.update()
+
     if not ConsumerIdentity.existsAndValid():
         log.error('Either the consumer is not registered or the certificates' +
                   ' are corrupted. Certificate update using daemon failed.')
@@ -87,13 +102,13 @@ def _main(options, log):
 
     try:
         if options.autoheal:
-            actionclient = action_client.HealingActionClient()
+            action_client = HealingActionClient()
         else:
-            actionclient = action_client.ActionClient()
+            action_client = ActionClient()
 
-        actionclient.update(options.autoheal)
+        action_client.update(options.autoheal)
 
-        for update_report in actionclient.update_reports:
+        for update_report in action_client.update_reports:
             # FIXME: make sure we don't get None reports
             if update_report:
                 print(update_report)

@@ -18,26 +18,38 @@
 This module contains several utils used for VMs running on clouds
 """
 
+from typing import Union
+
 import logging
 
 from rhsmlib.facts.host_collector import HostCollector
 from rhsmlib.facts.hwprobe import HardwareCollector
 
-from rhsmlib.cloud.providers.aws import AWSCloudDetector
-from rhsmlib.cloud.providers.azure import AzureCloudDetector
-from rhsmlib.cloud.providers.gcp import GCPCloudDetector
+from rhsmlib.cloud.detector import CloudDetector
+from rhsmlib.cloud.collector import CloudCollector
 
-# List of classes with supported cloud providers
+from rhsmlib.cloud.providers.aws import AWSCloudDetector, AWSCloudCollector
+from rhsmlib.cloud.providers.azure import AzureCloudDetector, AzureCloudCollector
+from rhsmlib.cloud.providers.gcp import GCPCloudDetector, GCPCloudCollector
+
+# List of detector classes with supported cloud providers
 CLOUD_DETECTORS = [
     AWSCloudDetector,
     AzureCloudDetector,
     GCPCloudDetector
 ]
 
+# List of collector classes with supported cloud provider
+CLOUD_COLLECTORS = [
+    AWSCloudCollector,
+    AzureCloudCollector,
+    GCPCloudCollector
+]
+
 log = logging.getLogger(__name__)
 
 
-def detect_cloud_provider():
+def detect_cloud_provider() -> list:
     """
     This method tries to detect cloud provider using hardware information provided by dmidecode.
     When there is strong sign that the VM is running on one of the cloud provider, then return
@@ -58,6 +70,7 @@ def detect_cloud_provider():
 
     # First try to detect cloud providers using strong signs
     cloud_list = []
+    cloud_detector: CloudDetector
     for cloud_detector in cloud_detectors:
         cloud_detected = cloud_detector.is_running_on_cloud()
         if cloud_detected is True:
@@ -78,8 +91,9 @@ def detect_cloud_provider():
     # When no cloud provider detected using strong signs, because behavior of cloud providers
     # has changed, then try to detect cloud provider using some heuristics
     cloud_list = []
+    cloud_detector: CloudDetector
     for cloud_detector in cloud_detectors:
-        probability = cloud_detector.is_likely_running_on_cloud()
+        probability: float = cloud_detector.is_likely_running_on_cloud()
         if probability > 0.0:
             cloud_list.append((probability, cloud_detector.ID))
     # Sort list according probability (provider with highest probability first)
@@ -91,6 +105,38 @@ def detect_cloud_provider():
         log.error('No cloud provider detected using heuristics')
 
     return cloud_list
+
+
+def collect_cloud_metadata(cloud_list: list) -> dict:
+    """
+    Try to collect metadata provided by cloud provider. We will tr
+    :param cloud_list: The list of detected cloud providers. In most cases the list contains only one item.
+    :return: The dictionary with metadata and signature (when signature is provided by cloud provider).
+        Empty dictionary is returned, when it wasn't possible to collect any metadata
+    """
+
+    # Create dispatcher dictionary from the list of supported cloud collectors
+    cloud_collectors = {
+        collector_cls.CLOUD_PROVIDER_ID: collector_cls for collector_cls in CLOUD_COLLECTORS
+    }
+
+    result = {}
+    # Go through the list of detected cloud providers and try to collect
+    # metadata. When metadata are gathered, then break the loop
+    for cloud_collector_id in cloud_list:
+        cloud_collector: CloudCollector = cloud_collectors[cloud_collector_id]()
+        metadata: Union[str, None] = cloud_collector.get_metadata()
+        if metadata is None:
+            continue
+        signature: Union[str, None] = cloud_collector.get_signature()
+        result = {
+            'cloud_provider_id': cloud_collector_id,
+            'metadata': metadata,
+            'signature': signature
+        }
+        break
+
+    return result
 
 
 # Some temporary smoke testing code. You can test this module using:
