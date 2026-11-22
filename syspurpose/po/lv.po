@@ -1,0 +1,380 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+# Rihards Prieditis <rprieditis@gmail.com>, 2026.
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2022-03-02 12:40+0100\n"
+"PO-Revision-Date: 2026-11-22 23:18+0000\n"
+"Last-Translator: Rihards Prieditis <rprieditis@gmail.com>\n"
+"Language-Team: Latvian <https://translate.fedoraproject.org/projects/"
+"subscription-manager/syspurpose-1-28/lv/>\n"
+"Language: lv\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n % 10 == 0 || n % 100 >= 11 && n % 100 <= "
+"19) ? 0 : ((n % 10 == 1 && n % 100 != 11) ? 1 : 2);\n"
+"X-Generator: Weblate 2026.11.2\n"
+
+#: /usr/lib64/python3.6/argparse.py:295
+msgid "usage: "
+msgstr "lietošana: "
+
+#: /usr/lib64/python3.6/argparse.py:830
+msgid ".__call__() not defined"
+msgstr ".__call__() nav definēts"
+
+#: /usr/lib64/python3.6/argparse.py:1127
+#, python-format
+msgid "unknown parser %(parser_name)r (choices: %(choices)s)"
+msgstr "nezināms parsētājs %(parser_name)r (izvēles: %(choices)s)"
+
+#: /usr/lib64/python3.6/argparse.py:1181
+#, python-format
+msgid "argument \"-\" with mode %r"
+msgstr "arguments \"-\" ar režīmu %r"
+
+#: /usr/lib64/python3.6/argparse.py:1189
+#, python-format
+msgid "can't open '%s': %s"
+msgstr "nevar atvērt „%s”: %s"
+
+#: /usr/lib64/python3.6/argparse.py:1393
+#, python-format
+msgid "cannot merge actions - two groups are named %r"
+msgstr "nevar apvienot darbības — divām grupām ir nosaukums %r"
+
+#: /usr/lib64/python3.6/argparse.py:1431
+msgid "'required' is an invalid argument for positionals"
+msgstr "'required' ir nederīgs arguments pozicionālajiem argumentiem"
+
+#: /usr/lib64/python3.6/argparse.py:1453
+#, python-format
+msgid ""
+"invalid option string %(option)r: must start with a character "
+"%(prefix_chars)r"
+msgstr ""
+"nederīga opcijas virkne %(option)r: jāsākas ar rakstzīmi %(prefix_chars)r"
+
+#: /usr/lib64/python3.6/argparse.py:1473
+#, python-format
+msgid "dest= is required for options like %r"
+msgstr "tādām opcijām kā %r ir obligāts dest="
+
+#: /usr/lib64/python3.6/argparse.py:1490
+#, python-format
+msgid "invalid conflict_resolution value: %r"
+msgstr "nederīga conflict_resolution vērtība: %r"
+
+#: /usr/lib64/python3.6/argparse.py:1508
+#, python-format
+msgid "conflicting option string: %s"
+msgid_plural "conflicting option strings: %s"
+msgstr[0] "konfliktējošas opciju virknes: %s"
+msgstr[1] "konfliktējoša opcijas virkne: %s"
+msgstr[2] "konfliktējošas opciju virknes: %s"
+
+#: /usr/lib64/python3.6/argparse.py:1574
+msgid "mutually exclusive arguments must be optional"
+msgstr "savstarpēji izslēdzošiem argumentiem jābūt neobligātiem"
+
+#: /usr/lib64/python3.6/argparse.py:1637
+msgid "positional arguments"
+msgstr "pozicionālie argumenti"
+
+#: /usr/lib64/python3.6/argparse.py:1638
+msgid "optional arguments"
+msgstr "neobligātie argumenti"
+
+#: /usr/lib64/python3.6/argparse.py:1653
+msgid "show this help message and exit"
+msgstr "parādīt šo palīdzības ziņojumu un iziet"
+
+#: /usr/lib64/python3.6/argparse.py:1684
+msgid "cannot have multiple subparser arguments"
+msgstr "nevar būt vairāki apakšparsētāja argumenti"
+
+#: /usr/lib64/python3.6/argparse.py:1736
+#, python-format
+msgid "unrecognized arguments: %s"
+msgstr "neatpazīti argumenti: %s"
+
+#: /usr/lib64/python3.6/argparse.py:1833
+#, python-format
+msgid "not allowed with argument %s"
+msgstr "nav atļauts ar argumentu %s"
+
+#: /usr/lib64/python3.6/argparse.py:1879 /usr/lib64/python3.6/argparse.py:1893
+#, python-format
+msgid "ignored explicit argument %r"
+msgstr "ignorēts skaidri norādīts arguments %r"
+
+#: /usr/lib64/python3.6/argparse.py:2000
+#, python-format
+msgid "the following arguments are required: %s"
+msgstr "nepieciešami šādi argumenti: %s"
+
+#: /usr/lib64/python3.6/argparse.py:2015
+#, python-format
+msgid "one of the arguments %s is required"
+msgstr "nepieciešams viens no argumentiem %s"
+
+#: /usr/lib64/python3.6/argparse.py:2058
+msgid "expected one argument"
+msgstr "gaidīts viens arguments"
+
+#: /usr/lib64/python3.6/argparse.py:2059
+msgid "expected at most one argument"
+msgstr "gaidīts ne vairāk kā viens arguments"
+
+#: /usr/lib64/python3.6/argparse.py:2060
+msgid "expected at least one argument"
+msgstr "gaidīts vismaz viens arguments"
+
+#: /usr/lib64/python3.6/argparse.py:2062
+#, python-format
+msgid "expected %s argument"
+msgid_plural "expected %s arguments"
+msgstr[0] "gaidīti argumenti: %s"
+msgstr[1] "gaidīts %s arguments"
+msgstr[2] "gaidīti argumenti: %s"
+
+#: /usr/lib64/python3.6/argparse.py:2122
+#, python-format
+msgid "ambiguous option: %(option)s could match %(matches)s"
+msgstr "neviennozīmīga opcija: %(option)s var atbilst %(matches)s"
+
+#: /usr/lib64/python3.6/argparse.py:2185
+#, python-format
+msgid "unexpected option string: %s"
+msgstr "negaidīta opcijas virkne: %s"
+
+#: /usr/lib64/python3.6/argparse.py:2289
+#, python-format
+msgid "%r is not callable"
+msgstr "%r nav izsaucams"
+
+#: /usr/lib64/python3.6/argparse.py:2306
+#, python-format
+msgid "invalid %(type)s value: %(value)r"
+msgstr "nederīga %(type)s vērtība: %(value)r"
+
+#: /usr/lib64/python3.6/argparse.py:2317
+#, python-format
+msgid "invalid choice: %(value)r (choose from %(choices)s)"
+msgstr "nederīga izvēle: %(value)r (izvēlieties no %(choices)s)"
+
+#: /usr/lib64/python3.6/argparse.py:2393
+#, python-format
+msgid "%(prog)s: error: %(message)s\n"
+msgstr "%(prog)s: kļūda: %(message)s\n"
+
+#: src/syspurpose/cli.py:29
+#, python-brace-format
+msgid ""
+"Warning: A {attr} of \"{download_value}\" was recently set for this system "
+"by the entitlement server administrator.\n"
+"{advice}"
+msgstr ""
+"Brīdinājums: piešķīrumu servera administrators šai sistēmai nesen iestatīja "
+"{attr} uz „{download_value}”.\n"
+"{advice}"
+
+#: src/syspurpose/cli.py:31
+#, python-brace-format
+msgid "If you'd like to overwrite the server side change please run: {command}"
+msgstr ""
+"Ja vēlaties pārrakstīt servera puses izmaiņu, lūdzu, izpildiet: {command}"
+
+#: src/syspurpose/cli.py:47
+#, python-brace-format
+msgid "Added \"{value}\" to {prop_name}."
+msgstr "Pievienots „{value}” īpašībai {prop_name}."
+
+#: src/syspurpose/cli.py:50
+#, python-brace-format
+msgid "Not adding value \"{value}\" to {prop_name}; it already exists."
+msgstr ""
+"Vērtība „{value}” netiek pievienota īpašībai {prop_name}; tā jau eksistē."
+
+#: src/syspurpose/cli.py:56 src/syspurpose/cli.py:85
+#, python-brace-format
+msgid "{attr} updated."
+msgstr "{attr} atjaunināts."
+
+#: src/syspurpose/cli.py:79
+#, python-brace-format
+msgid "Removed \"{val}\" from {name}."
+msgstr "Noņemts „{val}” no {name}."
+
+#: src/syspurpose/cli.py:81
+#, python-brace-format
+msgid "Not removing value \"{val}\" from {name}; it was not there."
+msgstr "Vērtība „{val}” netiek noņemta no {name}; tās tur nebija."
+
+#: src/syspurpose/cli.py:108
+#, python-brace-format
+msgid "{attr} set to \"{val}\"."
+msgstr "{attr} iestatīts uz „{val}”."
+
+#: src/syspurpose/cli.py:129
+#, python-brace-format
+msgid "{attr} unset."
+msgstr "{attr} atiestatīts."
+
+#: src/syspurpose/cli.py:157
+msgid "System Syspurpose Management Tool"
+msgstr "Sistēmas syspurpose pārvaldības rīks"
+
+#: src/syspurpose/cli.py:158 src/syspurpose/cli.py:353
+msgid ""
+"The 'syspurpose' command is deprecated and will be removed in a future major "
+"release. Please use the 'subscription-manager syspurpose' command going "
+"forward."
+msgstr ""
+"Komanda 'syspurpose' ir novecojusi un tiks noņemta nākamajā galvenajā "
+"laidienā. Turpmāk, lūdzu, izmantojiet komandu 'subscription-manager "
+"syspurpose'."
+
+#: src/syspurpose/cli.py:165 src/syspurpose/cli.py:230
+msgid "The value(s) to add"
+msgstr "Pievienojamā(-s) vērtība(-s)"
+
+#: src/syspurpose/cli.py:169 src/syspurpose/cli.py:252
+msgid "The value(s) to remove"
+msgstr "Noņemamā(-s) vērtība(-s)"
+
+#: src/syspurpose/cli.py:173 src/syspurpose/cli.py:195
+msgid "The value to set"
+msgstr "Iestatāmā vērtība"
+
+#: src/syspurpose/cli.py:183
+msgid "Sets the value for the given property"
+msgstr "Iestata norādītās īpašības vērtību"
+
+#: src/syspurpose/cli.py:189 src/syspurpose/cli.py:211
+msgid "The name of the property to set/update"
+msgstr "Iestatāmās/atjaunināmās īpašības nosaukums"
+
+#: src/syspurpose/cli.py:204
+msgid "Unsets (clears) the value for the given property"
+msgstr "Atiestata (notīra) norādītās īpašības vērtību"
+
+#: src/syspurpose/cli.py:218
+msgid "Adds the value(s) to the given property"
+msgstr "Pievieno norādītajai īpašībai vērtību(-as)"
+
+#: src/syspurpose/cli.py:224 src/syspurpose/cli.py:246
+msgid "The name of the property to update"
+msgstr "Atjaunināmās īpašības nosaukums"
+
+#: src/syspurpose/cli.py:240
+msgid "Removes the value(s) from the given property"
+msgstr "Noņem vērtību(-as) no norādītās īpašības"
+
+#: src/syspurpose/cli.py:262
+msgid "Set the system role to the system syspurpose"
+msgstr "Iestatīt sistēmas lomu sistēmas syspurpose"
+
+#: src/syspurpose/cli.py:270
+msgid "Clear set role"
+msgstr "Notīrīt iestatīto lomu"
+
+#: src/syspurpose/cli.py:278
+msgid "Add addons to the system syspurpose"
+msgstr "Pievienot papildinājumus sistēmas syspurpose"
+
+#: src/syspurpose/cli.py:286
+msgid "Remove addons from the system syspurpose"
+msgstr "Noņemt papildinājumus no sistēmas syspurpose"
+
+#: src/syspurpose/cli.py:293
+msgid "Clear set addons"
+msgstr "Notīrīt iestatītos papildinājumus"
+
+#: src/syspurpose/cli.py:301
+msgid "Set the system sla"
+msgstr "Iestatīt sistēmas SLA"
+
+#: src/syspurpose/cli.py:308
+msgid "Clear set sla"
+msgstr "Notīrīt iestatīto SLA"
+
+#: src/syspurpose/cli.py:316
+msgid "Set the system usage"
+msgstr "Iestatīt sistēmas lietojumu"
+
+#: src/syspurpose/cli.py:324
+msgid "Clear set usage"
+msgstr "Notīrīt iestatīto lietojumu"
+
+#: src/syspurpose/cli.py:332
+msgid "Show the current system syspurpose"
+msgstr "Rādīt pašreizējo sistēmas syspurpose"
+
+#: src/syspurpose/cli.py:350
+msgid ""
+"WARNING: Setting syspurpose in containers has no effect.\n"
+"Please run syspurpose on the host.\n"
+msgstr ""
+"BRĪDINĀJUMS: syspurpose iestatīšanai konteineros nav ietekmes.\n"
+"Lūdzu, izpildiet syspurpose resursdatorā.\n"
+
+#: src/syspurpose/cli.py:364
+msgid ""
+"Warning: Unable to sync system purpose with subscription management server: "
+"subscription_manager module is not available."
+msgstr ""
+"Brīdinājums: nevar sinhronizēt sistēmas nolūku ar abonementu pārvaldības "
+"serveri: modulis subscription_manager nav pieejams."
+
+#: src/syspurpose/files.py:106
+msgid "Error: Malformed data in file {}; please review and correct."
+msgstr ""
+"Kļūda: nepareizi veidoti dati failā {}; lūdzu, pārskatiet un izlabojiet."
+
+#: src/syspurpose/files.py:112
+msgid ""
+"Cannot read syspurpose file {}\n"
+"Are you root?"
+msgstr ""
+"Nevar nolasīt syspurpose failu {}\n"
+"Vai esat root?"
+
+#: src/syspurpose/files.py:466
+#, python-brace-format
+msgid ""
+"Warning: Provided value \"{val}\" is not included in the list of valid "
+"values for attribute {attr}:"
+msgstr ""
+"Brīdinājums: norādītā vērtība „{val}” nav atribūta {attr} derīgo vērtību "
+"sarakstā:"
+
+#: src/syspurpose/files.py:473
+#, python-brace-format
+msgid ""
+"Warning: Provided key \"{key}\" is not included in the list of valid keys:"
+msgstr "Brīdinājums: norādītā atslēga „{key}” nav derīgo atslēgu sarakstā:"
+
+#: src/syspurpose/main.py:32
+msgid "User interrupted process"
+msgstr "Lietotājs pārtrauca procesu"
+
+#: src/syspurpose/utils.py:59
+msgid ""
+"Cannot create directory {}\n"
+"Are you root?"
+msgstr ""
+"Nevar izveidot direktoriju {}\n"
+"Vai esat root?"
+
+#: src/syspurpose/utils.py:80
+msgid ""
+"Cannot create file {}\n"
+"Are you root?"
+msgstr ""
+"Nevar izveidot failu {}\n"
+"Vai esat root?"
